@@ -1,7 +1,9 @@
 from .base import VoiceEngine
 from .fake import FakeEngine
+from .rvc_applio import RvcApplioEngine
 
-ENGINES: dict[str, type[VoiceEngine]] = {"fake": FakeEngine}
+ENGINES: dict[str, type[VoiceEngine]] = {"rvc": RvcApplioEngine, "fake": FakeEngine}
+DEFAULT_ENGINE = "rvc"
 
 
 def get_engine(name: str) -> VoiceEngine:

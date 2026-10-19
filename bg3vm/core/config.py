@@ -22,16 +22,20 @@ CACHE_DIR = DATA_DIR / "cache"  # shared across projects: decoded original game 
 class Settings:
     game_dir: str = ""
     bg3_appdata: str = ""
-    engine: str = "fake"
+    engine: str = "rvc"
     last_project: str = ""
     extra: dict = field(default_factory=dict)
+    version: int = 2  # v1 defaulted the engine to the test engine
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Settings":
         path = path or CONFIG_DIR / "settings.json"
         try:
             data = json.loads(path.read_text())
-            return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+            st = cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+            if data.get("version", 1) < 2:
+                st.engine, st.version = "rvc", 2
+            return st
         except (OSError, ValueError):
             return cls()
 

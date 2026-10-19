@@ -129,26 +129,32 @@ def _engine(ctx: Context):
     eng = get_engine(ctx.project.engine)
     ok, why = eng.available()
     if not ok:
-        raise RuntimeError(f"Engine {eng.label} unavailable: {why}")
+        ctx.emit(0.0, f"{why}. Installing {eng.label} ({eng.install_size_hint}); this happens once…")
+        eng.install(ctx.emit, ctx.cancel)
+        ok, why = eng.available()
+        if not ok:
+            raise RuntimeError(f"Engine {eng.label} unavailable: {why}")
     return eng
 
 
 def stage_train(ctx: Context) -> None:
     p = ctx.project
-    _engine(ctx).train(p.dir("dataset"), p.dir("model"), p.preset, ctx.emit)
+    _engine(ctx).train(p.dir("dataset"), p.dir("model"), p.preset, ctx.emit, ctx.cancel)
 
 
 def stage_convert(ctx: Context) -> None:
     p = ctx.project
     eng = _engine(ctx)
     lines = json.loads((p.dir("index") / "lines.json").read_text())
-    wavs = [Path(ln["wav"]) for ln in lines]
-    for i, w in enumerate(wavs):
-        ctx.check()
-        dst = p.dir("conv_wav") / w.name
-        if not dst.exists():
-            eng.convert(p.dir("model"), w, dst, p.transpose)
-        ctx.emit((i + 1) / len(wavs), f"Converting {i + 1}/{len(wavs)}")
+    transpose = p.transpose
+    if p.auto_pitch:
+        from bg3vm.audio.pitch import auto_transpose
+        transpose = auto_transpose([Path(l["wav"]) for l in lines[:60]], sorted(p.dir("dataset").glob("*.wav"))[:60])
+        ctx.emit(0.0, f"Automatic pitch shift: {transpose:+d} semitones")
+    pairs = [(Path(ln["wav"]), p.dir("conv_wav") / f"{ln['key']}.wav") for ln in lines]
+    todo = [(s, d) for s, d in pairs if not d.exists()]
+    if todo:
+        eng.convert_batch(p.dir("model"), todo, transpose, ctx.emit, ctx.cancel)
 
 
 def stage_encode(ctx: Context) -> None:
@@ -157,7 +163,7 @@ def stage_encode(ctx: Context) -> None:
     for i, ln in enumerate(lines):
         ctx.check()
         orig = sf.info(ln["wav"])
-        data = wav_to_wem(p.dir("conv_wav") / f"{ln['key']}.wav", orig.samplerate, orig.channels)
+        data = wav_to_wem(p.dir("conv_wav") / f"{ln['key']}.wav", orig.samplerate, orig.channels, orig.frames)
         (p.dir("new_wem") / f"{ln['key']}.wem").write_bytes(data)
         ctx.emit((i + 1) / len(lines), f"Encoding {i + 1}/{len(lines)}")
 
@@ -203,7 +209,7 @@ STAGES = [
           key=_inputs_fp, outputs=("dataset", "tmp", "qc.json")),
     Stage("train", "Train voice model", stage_train,
           key=lambda p: [p.engine, p.preset], deps=("dataset",), outputs=("model",)),
-    Stage("convert", "Convert lines", stage_convert, key=lambda p: p.transpose,
+    Stage("convert", "Convert lines", stage_convert, key=lambda p: [p.transpose, p.auto_pitch],
           deps=("train", "extract"), outputs=("conv_wav",)),
     Stage("encode", "Encode .wem", stage_encode, deps=("convert",), outputs=("new_wem",)),
     Stage("package", "Build mod package", stage_package, key=lambda p: p.name,

@@ -24,7 +24,9 @@ def pcm_to_wem(samples: np.ndarray, rate: int) -> bytes:
     return b"RIFF" + struct.pack("<I", len(body)) + body
 
 
-def wav_to_wem(wav_path: str | Path, rate: int | None = None, channels: int | None = None) -> bytes:
+def wav_to_wem(wav_path: str | Path, rate: int | None = None, channels: int | None = None,
+               frames: int | None = None) -> bytes:
+    """frames: force the exact length (in output samples); cutscene lines must keep the original duration."""
     data, sr = sf.read(str(wav_path), dtype="float32", always_2d=True)
     if channels and data.shape[1] != channels:
         data = data.mean(axis=1, keepdims=True).repeat(channels, axis=1)
@@ -33,4 +35,6 @@ def wav_to_wem(wav_path: str | Path, rate: int | None = None, channels: int | No
         x = np.linspace(0, len(data) - 1, n)
         data = np.stack([np.interp(x, np.arange(len(data)), data[:, c]) for c in range(data.shape[1])], 1)
         sr = rate
+    if frames is not None:
+        data = data[:frames] if len(data) >= frames else np.pad(data, ((0, frames - len(data)), (0, 0)))
     return pcm_to_wem(data, sr)

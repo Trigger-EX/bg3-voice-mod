@@ -17,7 +17,7 @@ class FakeEngine(VoiceEngine):
     def available(self):
         return True, ""
 
-    def train(self, dataset_dir, model_dir, preset, progress: Progress):
+    def train(self, dataset_dir, model_dir, preset, progress: Progress, cancel=None):
         clips = sorted(Path(dataset_dir).glob("*.wav"))
         model_dir.mkdir(parents=True, exist_ok=True)
         for i, _ in enumerate(clips):

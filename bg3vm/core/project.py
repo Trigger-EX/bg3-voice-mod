@@ -15,9 +15,10 @@ class Project:
     root: Path
     speaker: str = ""  # known name or 32-hex speaker id
     voice_inputs: list[str] = field(default_factory=list)
-    engine: str = "fake"
+    engine: str = "rvc"
     preset: str = "good"
     transpose: int = 0
+    auto_pitch: bool = True  # estimate the semitone shift from your voice vs. the original line
     max_lines: int = 0  # 0 = all
     mod_uuid: str = field(default_factory=lambda: str(uuid.uuid4()))
 

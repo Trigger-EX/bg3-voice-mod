@@ -217,8 +217,31 @@ class MainWindow(QMainWindow):
         self.engine_box = QComboBox()
         for k, cls in ENGINES.items():
             self.engine_box.addItem(cls.label, k)
+        self.engine_box.setCurrentIndex(self.engine_box.findData(self.settings.engine))
         cl.addWidget(QLabel("Voice engine"))
         cl.addWidget(self.engine_box)
+        self.preset_box = QComboBox()
+        for label, key in [("Fast (quick test, lower quality)", "fast"), ("Good (recommended)", "good"),
+                           ("Best (slowest)", "best")]:
+            self.preset_box.addItem(label, key)
+        self.preset_box.setCurrentIndex(1)
+        cl.addWidget(QLabel("Training quality"))
+        cl.addWidget(self.preset_box)
+        self.auto_pitch = QCheckBox("Match pitch automatically (recommended)")
+        self.auto_pitch.setChecked(True)
+        self.pitch_spin = QSpinBox()
+        self.pitch_spin.setRange(-24, 24)
+        self.pitch_spin.setSuffix(" semitones")
+        self.pitch_spin.setEnabled(False)
+        self.auto_pitch.toggled.connect(lambda on: self.pitch_spin.setEnabled(not on))
+        cl.addWidget(self.auto_pitch)
+        cl.addWidget(QLabel("Manual pitch shift (e.g. +12 for a male original voice → female voice)"))
+        cl.addWidget(self.pitch_spin)
+        note = QLabel("Only use recordings of your own voice, or of someone who has given you permission. "
+                      "The model is trained on your recordings alone; game audio is only used as input to convert.")
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        cl.addWidget(note)
         self.maxlines = QSpinBox()
         self.maxlines.setRange(0, 100000)
         self.maxlines.setSpecialValueText("All lines")
@@ -317,6 +340,7 @@ class MainWindow(QMainWindow):
         s = self.settings
         s.game_dir = self.game_edit.text()
         s.bg3_appdata = self.appdata_edit.text().strip()
+        s.engine = self.engine_box.currentData()
         s.save()
         name = re.sub(r"[^A-Za-z0-9_-]+", "_", self.name_edit.text().strip() or f"{speaker}_voice").strip("_")
         root = PROJECTS_DIR / name
@@ -325,8 +349,19 @@ class MainWindow(QMainWindow):
         p.speaker = speaker
         p.voice_inputs = list(self.files)
         p.engine = self.engine_box.currentData()
+        p.preset = self.preset_box.currentData()
+        p.auto_pitch = self.auto_pitch.isChecked()
+        p.transpose = self.pitch_spin.value()
         p.max_lines = self.maxlines.value()
         p.save()
+        eng = ENGINES[p.engine]()
+        if not eng.available()[0] and eng.install_size_hint:
+            ok = QMessageBox.question(
+                self, "Download voice engine",
+                f"{eng.label} needs a one-time download ({eng.install_size_hint}).\n\n"
+                "It installs into the app's own folder and happens automatically as part of the run. Continue?")
+            if ok != QMessageBox.Yes:
+                return
         self.go.setEnabled(False)
         self.cancel_btn.setEnabled(True)
         self.runner.start(p, s, {st.name for st in STAGES} if self.fresh.isChecked() else None)

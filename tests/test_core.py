@@ -90,7 +90,7 @@ def test_full_pipeline_fake_engine(tmp_path, monkeypatch):
     sf.write(str(tmp_path / "me.wav"), (0.4 * np.sin(2 * np.pi * 180 * t) * (np.sin(2 * np.pi * 0.2 * t) > -0.3)).astype("float32"), 40000)
 
     class S: game_dir = str(game); bg3_appdata = str(appdata)
-    p = Project.create("t", base=tmp_path / "proj", speaker="Astarion",
+    p = Project.create("t", base=tmp_path / "proj", engine="fake", speaker="Astarion",
                        voice_inputs=[str(tmp_path / "me.wav")])
     msgs = []
     run_stages(pipeline.STAGES, Context(p, lambda f, m: msgs.append(m), threading.Event(), S()))
@@ -144,7 +144,7 @@ def test_changing_inputs_invalidates_old_work(tmp_path):
     sf.write(str(tmp_path / "me.wav"), (0.4 * np.sin(2 * np.pi * 180 * t) * (np.sin(2 * np.pi * 0.2 * t) > -0.3)).astype("float32"), 40000)
 
     class S: game_dir = str(tmp_path / "game"); bg3_appdata = str(tmp_path / "ad")
-    p = Project.create("t", base=tmp_path / "proj", speaker="Astarion", voice_inputs=[str(tmp_path / "me.wav")])
+    p = Project.create("t", base=tmp_path / "proj", engine="fake", speaker="Astarion", voice_inputs=[str(tmp_path / "me.wav")])
     ctx = Context(p, lambda f, m: None, threading.Event(), S())
     run_stages(pipeline.STAGES, ctx)
     first = {Path(l["wav"]).name for l in json.loads((p.root / "index/lines.json").read_text())}
@@ -176,7 +176,7 @@ def test_extraction_shared_between_projects(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "decode_wem", lambda a, b: (decoded.append(a), real(a, b)))
 
     def extract_only(name):
-        p = Project.create(name, base=tmp_path / "proj", speaker="Astarion")
+        p = Project.create(name, base=tmp_path / "proj", engine="fake", speaker="Astarion")
         run_stages(pipeline.STAGES[:2], Context(p, lambda f, m: None, threading.Event(), S()))
         return p
 
