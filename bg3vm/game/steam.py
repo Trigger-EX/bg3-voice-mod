@@ -49,6 +49,13 @@ class GameInstall:
     game_dir: Path
     appdata_dir: Path | None  # Proton prefix 'Larian Studios/Baldur's Gate 3'
 
+    @classmethod
+    def from_game_dir(cls, game_dir: Path, appdata_override: Path | None = None,
+                      home: Path | None = None) -> "GameInstall":
+        """Build from a (possibly user-chosen) game folder; locate the Proton prefix automatically."""
+        game_dir = Path(game_dir)
+        return cls(game_dir, appdata_override or find_appdata(game_dir, home))
+
     @property
     def mods_dir(self) -> Path | None:
         return self.appdata_dir / "Mods" if self.appdata_dir else None
@@ -87,11 +94,22 @@ def steam_libraries(home: Path) -> list[Path]:
     return out
 
 
+def find_appdata(game_dir: Path, home: Path | None = None) -> Path | None:
+    """Find the Proton prefix's BG3 user folder. The prefix usually sits beside the game's library, but
+    can live in any Steam library, so check the game's own library first and then all others."""
+    home = home or Path.home()
+    steamapps = [game_dir.parent.parent] + [lib / "steamapps" for lib in steam_libraries(home)]
+    for sa in steamapps:
+        pfx = sa / "compatdata" / APP_ID / "pfx"
+        if pfx.is_dir():
+            return sa / "compatdata" / APP_ID / APPDATA_REL  # created on install if the game never ran
+    return None
+
+
 def find_bg3(home: Path | None = None) -> GameInstall | None:
     home = home or Path.home()
     for lib in steam_libraries(home):
         game = lib / "steamapps" / "common" / GAME_DIRNAME
         if game.is_dir():
-            prefix = lib / "steamapps" / "compatdata" / APP_ID / APPDATA_REL
-            return GameInstall(game, prefix if prefix.parent.exists() else None)
+            return GameInstall.from_game_dir(game, home=home)
     return None

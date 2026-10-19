@@ -99,3 +99,28 @@ def test_speaker_parsing():
     lines = [VoiceLine(stem, "p", "e", m.group(1), m.group(2))]
     assert lines_for_speaker(lines, "karlach") and lines_for_speaker(lines, "v" + m.group(1))
     assert list_speakers(lines)[0].name == "Karlach"
+
+
+def test_appdata_found_in_other_library(tmp_path):
+    from bg3vm.game.steam import GameInstall
+    default = tmp_path / ".local/share/Steam"
+    (default / "steamapps/compatdata/1086940/pfx").mkdir(parents=True)
+    ext = tmp_path / "media/EVO1/SteamLibrary"
+    (ext / "steamapps/common/Baldurs Gate 3").mkdir(parents=True)
+    (default / "steamapps/libraryfolders.vdf").write_text('"libraryfolders" { "0" { "path" "%s" } "1" { "path" "%s" } }' % (default, ext))
+    g = GameInstall.from_game_dir(ext / "steamapps/common/Baldurs Gate 3", home=tmp_path)
+    assert g.appdata_dir and "compatdata/1086940" in str(g.appdata_dir)
+    assert GameInstall.from_game_dir(tmp_path / "nowhere/x/y", home=tmp_path / "empty").appdata_dir is None
+
+
+def test_install_skipped_without_prefix(tmp_path, monkeypatch):
+    import bg3vm.core.pipeline as pl
+    monkeypatch.setattr(pl.GameInstall, "from_game_dir", classmethod(lambda cls, g, o=None, home=None: cls(g, None)))
+    mod = build_mod(tmp_path / "proj/out", "m", {"a.wem": b"x"})
+    p = Project.create("p", base=tmp_path / "proj2")
+    (p.dir("out") / "mod.json").write_text(json.dumps({**mod.__dict__, "pak": str(mod.pak), "zip": str(mod.zip)}))
+    class S: game_dir = str(tmp_path); bg3_appdata = ""
+    msgs = []
+    run_stages([pl.STAGES[-1]], Context(p, lambda f, m: msgs.append(m), threading.Event(), S()))
+    assert not (p.root / "state/install.done").exists()
+    assert "not installed" in msgs[-1]

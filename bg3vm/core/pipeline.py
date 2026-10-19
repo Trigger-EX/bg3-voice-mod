@@ -10,7 +10,7 @@ import soundfile as sf
 from bg3vm.audio import dataset as ds
 from bg3vm.audio.vgmstream import decode_wem
 from bg3vm.audio.wem import wav_to_wem
-from bg3vm.core.jobs import Context, Stage
+from bg3vm.core.jobs import Context, Skip, Stage
 from bg3vm.core.logs import LOG_FILE
 from bg3vm.engines import get_engine
 from bg3vm.game.lspk import PakReader
@@ -25,8 +25,7 @@ log = logging.getLogger("bg3vm.pipeline")
 def _game(ctx: Context) -> GameInstall:
     s = ctx.settings
     if s and s.game_dir:
-        appdata = Path(s.bg3_appdata) if s.bg3_appdata else None
-        return GameInstall(Path(s.game_dir), appdata)
+        return GameInstall.from_game_dir(Path(s.game_dir), Path(s.bg3_appdata) if s.bg3_appdata else None)
     g = find_bg3()
     if not g:
         raise RuntimeError("Baldur's Gate 3 not found; set the game folder in Setup.")
@@ -130,10 +129,14 @@ def stage_package(ctx: Context) -> None:
 
 def stage_install(ctx: Context) -> None:
     g = _game(ctx)
-    if not g.appdata_dir:
-        raise RuntimeError("Proton prefix not found; copy the .pak from the project's out/ folder manually.")
     d = json.loads((ctx.project.dir("out") / "mod.json").read_text())
     mod = BuiltMod(Path(d["pak"]), Path(d["zip"]), d["name"], d["folder"], d["uuid"], d["version64"])
+    if not g.appdata_dir:
+        ctx.emit(1.0, f"Couldn't find BG3's Proton folder, so the mod was not installed.\n"
+                      f"Your mod is ready: {mod.pak}\n"
+                      f"Copy it into <BG3 user folder>/Mods, or set that folder in Setup and run again.")
+        (ctx.project.dir("state") / "install.done").unlink(missing_ok=True)
+        raise Skip()
     dest = install_mod(g.appdata_dir, mod)
     ctx.emit(1.0, f"Installed to {dest}")
 

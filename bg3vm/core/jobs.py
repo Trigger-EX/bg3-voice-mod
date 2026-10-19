@@ -16,6 +16,10 @@ class Cancelled(Exception):
     pass
 
 
+class Skip(Exception):
+    """Raised by a stage that finished without doing its job (not an error; no .done marker)."""
+
+
 @dataclass
 class Stage:
     name: str
@@ -49,6 +53,9 @@ def run_stages(stages: list[Stage], ctx: Context, force: set[str] | None = None,
         except Cancelled:
             log.info("stage %s: cancelled", st.name)
             raise
+        except Skip:
+            log.info("stage %s: skipped", st.name)
+            continue
         except Exception:
             log.exception("stage %s: failed", st.name)
             raise

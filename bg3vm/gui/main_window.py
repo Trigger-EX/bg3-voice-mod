@@ -3,7 +3,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from PySide6.QtCore import QEventLoop, Qt, QTimer
+from PySide6.QtCore import QEventLoop, Qt, QTimer, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow,
     QMessageBox, QPlainTextEdit, QProgressBar, QProgressDialog, QPushButton, QSpinBox,
@@ -88,7 +89,7 @@ class MainWindow(QMainWindow):
         self.runner.progress.connect(self._on_progress)
         self.runner.stage.connect(self._on_stage)
         self.runner.failed.connect(self._on_failed)
-        self.runner.done.connect(lambda: self._finish("Done! Launch the game and your voice is in."))
+        self.runner.done.connect(self._on_done)
         self.runner.cancelled.connect(lambda: self._finish("Cancelled. Progress is saved; run again to resume."))
 
         root = QWidget()
@@ -175,8 +176,7 @@ class MainWindow(QMainWindow):
         text = self.game_edit.text().strip()
         if not text:
             return None
-        found = find_bg3()
-        return GameInstall(Path(text), found.appdata_dir if found else None)
+        return GameInstall.from_game_dir(Path(text))
 
     # ---- pages
     def _setup_page(self) -> QWidget:
@@ -192,6 +192,15 @@ class MainWindow(QMainWindow):
         row.addWidget(b)
         cl.addWidget(QLabel("Game folder"))
         cl.addLayout(row)
+        self.appdata_edit = QLineEdit(self.settings.bg3_appdata)
+        self.appdata_edit.setPlaceholderText("BG3 user folder (auto-detected; contains Mods/ and PlayerProfiles/)")
+        ab = QPushButton("Browse…")
+        ab.clicked.connect(lambda: self._pick_dir(self.appdata_edit))
+        arow = QHBoxLayout()
+        arow.addWidget(self.appdata_edit, 1)
+        arow.addWidget(ab)
+        cl.addWidget(QLabel("Mod install folder (Proton prefix: …/Larian Studios/Baldur's Gate 3)"))
+        cl.addLayout(arow)
         self.detect_lbl = QLabel("")
         self.detect_lbl.setObjectName("muted")
         cl.addWidget(self.detect_lbl)
@@ -245,6 +254,11 @@ class MainWindow(QMainWindow):
         row.addWidget(self.go)
         row.addWidget(self.cancel_btn)
         row.addStretch(1)
+        for label, target in [("Open mod folder", lambda: self._open(self.project.dir("out"))),
+                              ("Open logs", lambda: self._open(LOG_FILE.parent))]:
+            b = QPushButton(label)
+            b.clicked.connect(target)
+            row.addWidget(b)
         cl.addWidget(self.stage_lbl)
         cl.addWidget(self.bar)
         cl.addLayout(row)
@@ -259,9 +273,15 @@ class MainWindow(QMainWindow):
         g = find_bg3()
         if g and not self.game_edit.text():
             self.game_edit.setText(str(g.game_dir))
+        if g and g.appdata_dir and not self.appdata_edit.text():
+            self.appdata_edit.setText(str(g.appdata_dir))
         self.detect_lbl.setText(
-            f"Detected Proton prefix: {g.appdata_dir}" if g and g.appdata_dir
-            else "Game found." if g else "Game not auto-detected; choose the folder.")
+            "Game and Proton prefix detected." if g and g.appdata_dir
+            else "Game found, but no Proton prefix; choose the mod install folder below." if g
+            else "Game not auto-detected; choose the folders.")
+
+    def _open(self, path: Path):
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     def _pick_dir(self, edit):
         d = QFileDialog.getExistingDirectory(self, "Choose folder", edit.text())
@@ -289,8 +309,7 @@ class MainWindow(QMainWindow):
             return
         s = self.settings
         s.game_dir = self.game_edit.text()
-        g = find_bg3()
-        s.bg3_appdata = str(g.appdata_dir) if g and g.appdata_dir else ""
+        s.bg3_appdata = self.appdata_edit.text().strip()
         s.save()
         p = self.project
         p.speaker = speaker
@@ -317,6 +336,12 @@ class MainWindow(QMainWindow):
     def _on_failed(self, msg):
         self.log.appendPlainText(f"ERROR: {msg}\nDetails: {LOG_FILE}")
         self._finish("Failed. See log; fix the issue and run again to resume.")
+
+    def _on_done(self):
+        out = self.project.dir("out")
+        installed = (self.project.dir("state") / "install.done").exists()
+        self._finish("Done! Launch the game and your voice is in." if installed
+                     else f"Mod built but not installed. Find it in: {out}")
 
     def _finish(self, text):
         self.stage_lbl.setText(text)
