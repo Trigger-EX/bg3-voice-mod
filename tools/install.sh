@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
-# Linux Mint / Ubuntu setup for BG3 Voice Forge.
+# Optional: system packages. Python dependencies (PySide6 etc.) are installed automatically
+# into an app-local venv the first time you run ./bg3-voice-forge.
 set -euo pipefail
 sudo apt-get update
-sudo apt-get install -y python3-venv python3-pip ffmpeg libxcb-cursor0 git
-python3 -m venv .venv
-.venv/bin/pip install -U pip
-.venv/bin/pip install -e '.[dev]'
-echo "Run with: .venv/bin/bg3vm"
+sudo apt-get install -y python3 python3-venv python3-pip ffmpeg libxcb-cursor0 git
+echo "Now run: ./bg3-voice-forge"

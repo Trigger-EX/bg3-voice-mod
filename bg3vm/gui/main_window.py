@@ -2,18 +2,22 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
-    QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow,
-    QPlainTextEdit, QProgressBar, QPushButton, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
+    QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow,
+    QMessageBox, QPlainTextEdit, QProgressBar, QProgressDialog, QPushButton, QSpinBox,
+    QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from bg3vm.core.config import Settings
 from bg3vm.core.pipeline import STAGES
 from bg3vm.core.project import Project
 from bg3vm.engines import ENGINES
-from bg3vm.game.steam import find_bg3
+from bg3vm.audio.vgmstream import find_vgmstream, install_vgmstream
+from bg3vm.game.steam import GameInstall, find_bg3
+from bg3vm.game.voicemeta import index_voice_paks, list_speakers
 from bg3vm.gui.runner import JobRunner
+from bg3vm.gui.workers import FuncThread
 
 
 def card() -> tuple[QFrame, QVBoxLayout]:
@@ -100,6 +104,77 @@ class MainWindow(QMainWindow):
         h.addWidget(self.stack, 1)
         self.setCentralWidget(root)
         self._autodetect()
+        QTimer.singleShot(300, self.ensure_vgmstream)
+
+    # ---- tools
+    def ensure_vgmstream(self, ask: bool = True) -> bool:
+        """Offer to install vgmstream-cli when missing. Returns True if available afterwards."""
+        if find_vgmstream():
+            return True
+        if ask:
+            btn = QMessageBox.question(
+                self, "vgmstream needed",
+                "vgmstream-cli was not found. It is needed to read the game's .wem audio.\n\n"
+                "Download and install it now into the app's own folder (about 8 MB)?")
+            if btn != QMessageBox.Yes:
+                return False
+        dlg = QProgressDialog("Installing vgmstream…", None, 0, 100, self)
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.setMinimumDuration(0)
+        dlg.show()
+        self._vgm_thread = t = FuncThread(install_vgmstream)
+        t.progress.connect(lambda f, m: (dlg.setValue(int(f * 100)), dlg.setLabelText(m)))
+        outcome: dict = {}
+        t.result.connect(lambda _: outcome.update(ok=True))
+        t.failed.connect(lambda m: outcome.update(err=m))
+        t.finished.connect(dlg.close)
+        t.start()
+        while t.isRunning():
+            QApplication.processEvents()
+            t.wait(30)
+        dlg.close()
+        if outcome.get("ok"):
+            self.log.appendPlainText("vgmstream installed.")
+            return True
+        QMessageBox.warning(self, "vgmstream", f"Install failed: {outcome.get('err')}\n"
+                            "You can install it manually and make sure `vgmstream-cli` is on PATH.")
+        return False
+
+    def _scan(self):
+        g = self._current_game()
+        if not g:
+            QMessageBox.information(self, "Scan", "Choose the Baldur's Gate 3 folder first.")
+            return
+        self.scan_btn.setEnabled(False)
+        self.scan_btn.setText("Scanning…")
+
+        def work(_progress):
+            paks = g.voice_paks()
+            if not paks:
+                raise RuntimeError("No Voice*.pak found under Data/Localization.")
+            return list_speakers(index_voice_paks(paks))
+
+        self._scan_thread = t = FuncThread(work)
+        t.result.connect(self._scan_done)
+        t.failed.connect(lambda m: (QMessageBox.warning(self, "Scan failed", m), self._scan_reset()))
+        t.start()
+
+    def _scan_reset(self):
+        self.scan_btn.setEnabled(True)
+        self.scan_btn.setText("Scan game for characters")
+
+    def _scan_done(self, speakers):
+        self.speaker_box.clear()
+        for sp in speakers:
+            self.speaker_box.addItem(f"{sp.name} — {sp.lines} lines", sp.id)
+        self._scan_reset()
+
+    def _current_game(self) -> GameInstall | None:
+        text = self.game_edit.text().strip()
+        if not text:
+            return None
+        found = find_bg3()
+        return GameInstall(Path(text), found.appdata_dir if found else None)
 
     # ---- pages
     def _setup_page(self) -> QWidget:
@@ -118,18 +193,15 @@ class MainWindow(QMainWindow):
         self.detect_lbl = QLabel("")
         self.detect_lbl.setObjectName("muted")
         cl.addWidget(self.detect_lbl)
-        self.speaker_edit = QLineEdit()
-        self.speaker_edit.setPlaceholderText("Character name, e.g. Astarion")
-        self.map_edit = QLineEdit()
-        self.map_edit.setPlaceholderText("speakers.json (character → voice line handles)")
-        mb = QPushButton("Browse…")
-        mb.clicked.connect(lambda: self._pick_file(self.map_edit, "JSON (*.json)"))
+        self.speaker_box = QComboBox()
+        self.speaker_box.setEditable(True)
+        self.speaker_box.lineEdit().setPlaceholderText("Scan the game, or type a name (e.g. Astarion)")
+        self.scan_btn = QPushButton("Scan game for characters")
+        self.scan_btn.clicked.connect(self._scan)
         r2 = QHBoxLayout()
-        r2.addWidget(self.map_edit, 1)
-        r2.addWidget(mb)
-        cl.addWidget(QLabel("Character"))
-        cl.addWidget(self.speaker_edit)
-        cl.addWidget(QLabel("Speaker map"))
+        r2.addWidget(self.speaker_box, 1)
+        r2.addWidget(self.scan_btn)
+        cl.addWidget(QLabel("Character to replace"))
         cl.addLayout(r2)
         self.engine_box = QComboBox()
         for k, cls in ENGINES.items():
@@ -206,8 +278,12 @@ class MainWindow(QMainWindow):
                 self.file_list.addItem(p)
 
     def _start(self):
-        if not self.speaker_edit.text().strip() or not self.files:
+        speaker = self.speaker_box.currentData() or self.speaker_box.currentText().split(" — ")[0].strip()
+        if not speaker or not self.files:
             self.log.appendPlainText("Pick a character and add at least one recording first.")
+            return
+        if not self.ensure_vgmstream():
+            self.log.appendPlainText("vgmstream is required to read game audio; install it and try again.")
             return
         s = self.settings
         s.game_dir = self.game_edit.text()
@@ -215,8 +291,7 @@ class MainWindow(QMainWindow):
         s.bg3_appdata = str(g.appdata_dir) if g and g.appdata_dir else ""
         s.save()
         p = self.project
-        p.speaker = self.speaker_edit.text().strip()
-        p.speaker_map = self.map_edit.text().strip()
+        p.speaker = speaker
         p.voice_inputs = list(self.files)
         p.engine = self.engine_box.currentData()
         p.max_lines = self.maxlines.value()

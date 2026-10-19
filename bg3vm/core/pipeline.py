@@ -13,7 +13,7 @@ from bg3vm.core.jobs import Context, Stage
 from bg3vm.engines import get_engine
 from bg3vm.game.lspk import PakReader
 from bg3vm.game.steam import GameInstall, find_bg3
-from bg3vm.game.voicemeta import index_voice_paks, lines_for_speaker, load_speaker_map
+from bg3vm.game.voicemeta import index_voice_paks, lines_for_speaker
 from bg3vm.mod.install import install_mod
 from bg3vm.mod.package import build_mod, BuiltMod
 
@@ -36,9 +36,7 @@ def stage_index(ctx: Context) -> None:
         raise RuntimeError("No Voice*.pak found in the game's Localization folder.")
     ctx.emit(0.0, "Indexing voice packs…")
     index = index_voice_paks(paks)
-    if not p.speaker_map:
-        raise RuntimeError("No speaker map set for this project (see docs/plan.md: VoiceMeta parser pending).")
-    lines = lines_for_speaker(index, load_speaker_map(Path(p.speaker_map)), p.speaker)
+    lines = lines_for_speaker(index, p.speaker)
     if p.max_lines:
         lines = lines[: p.max_lines]
     if not lines:

@@ -74,18 +74,28 @@ def test_full_pipeline_fake_engine(tmp_path, monkeypatch):
     game = tmp_path / "game"
     voice = game / "Data/Localization/English"
     voice.mkdir(parents=True)
-    wems = {f"Localization/English/Voice/v{i}abcdef01.wem": pcm_to_wem(np.random.uniform(-.3, .3, 24000).astype("float32"), 24000) for i in range(2)}
+    SPK = "c7c13742bacd460a8f65f864fe41f255"
+    wems = {f"Mods/Gustav/Localization/English/Soundbanks/v{SPK}_h{i}abcdef01g1.wem": pcm_to_wem(np.random.uniform(-.3, .3, 24000).astype("float32"), 24000) for i in range(2)}
     write_pak(voice / "Voice.pak", wems)
     appdata = tmp_path / "appdata"
-    (tmp_path / "speakers.json").write_text(json.dumps({"Hero": [f"v{i}abcdef01" for i in range(2)]}))
     # user recordings
     t = np.arange(40000 * 12) / 40000
     sf.write(str(tmp_path / "me.wav"), (0.4 * np.sin(2 * np.pi * 180 * t) * (np.sin(2 * np.pi * 0.2 * t) > -0.3)).astype("float32"), 40000)
 
     class S: game_dir = str(game); bg3_appdata = str(appdata)
-    p = Project.create("t", base=tmp_path / "proj", speaker="Hero", speaker_map=str(tmp_path / "speakers.json"),
+    p = Project.create("t", base=tmp_path / "proj", speaker="Astarion",
                        voice_inputs=[str(tmp_path / "me.wav")])
     msgs = []
     run_stages(pipeline.STAGES, Context(p, lambda f, m: msgs.append(m), threading.Event(), S()))
     assert list((appdata / "Mods").glob("*.pak"))
     assert (p.root / "state/install.done").exists()
+
+
+def test_speaker_parsing():
+    from bg3vm.game.voicemeta import SPEAKER_RE, lines_for_speaker, VoiceLine, list_speakers
+    stem = "v2c76687d93a2477b8b188a14b549304c_h109f706dg36cfg4089ga269gbe33b34cc981"
+    m = SPEAKER_RE.match(stem)
+    assert m and m.group(2).startswith("h109f706d")
+    lines = [VoiceLine(stem, "p", "e", m.group(1), m.group(2))]
+    assert lines_for_speaker(lines, "karlach") and lines_for_speaker(lines, "v" + m.group(1))
+    assert list_speakers(lines)[0].name == "Karlach"

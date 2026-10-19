@@ -12,8 +12,7 @@ from .config import PROJECTS_DIR
 class Project:
     name: str
     root: Path
-    speaker: str = ""
-    speaker_map: str = ""  # path to speakers.json
+    speaker: str = ""  # known name or 32-hex speaker id
     voice_inputs: list[str] = field(default_factory=list)
     engine: str = "fake"
     preset: str = "good"
