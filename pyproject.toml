@@ -1,0 +1,18 @@
+[project]
+name = "bg3vm"
+version = "0.1.0"
+description = "Baldur's Gate 3 voice replacer mod builder"
+requires-python = ">=3.10"
+dependencies = ["PySide6>=6.6", "numpy", "soundfile", "lz4", "zstandard"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+bg3vm = "bg3vm.app:main"
+
+[tool.setuptools.packages.find]
+include = ["bg3vm*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

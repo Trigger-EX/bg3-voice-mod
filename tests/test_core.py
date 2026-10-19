@@ -1,0 +1,91 @@
+import json
+import numpy as np
+import pytest
+import soundfile as sf
+
+from bg3vm.audio.wem import pcm_to_wem
+from bg3vm.audio.dataset import split_on_silence, qc_report
+from bg3vm.core.jobs import Context, run_stages
+from bg3vm.core.project import Project
+from bg3vm.core import pipeline
+from bg3vm.game.loca import build_loca, parse_loca
+from bg3vm.game.lspk import PakReader, write_pak
+from bg3vm.game.steam import find_bg3, parse_vdf
+from bg3vm.mod.meta import pack_version64
+from bg3vm.mod.package import build_mod
+from bg3vm.mod.install import install_mod
+import threading
+
+
+def test_pak_roundtrip(tmp_path):
+    files = {"a/b.wem": b"x" * 1000, "Mods/M/meta.lsx": b"<save/>"}
+    write_pak(tmp_path / "t.pak", files)
+    r = PakReader(tmp_path / "t.pak")
+    assert set(r.names()) == set(files)
+    assert all(r.read(k) == v for k, v in files.items())
+
+
+def test_loca_roundtrip():
+    d = {"h1": "Hello", "h2": "Wörld"}
+    assert parse_loca(build_loca(d)) == d
+
+
+def test_version64():
+    assert pack_version64(1, 0, 0, 0) == 36028797018963968
+
+
+def test_wem_header():
+    w = pcm_to_wem(np.zeros(100, dtype="float32"), 24000)
+    assert w[:4] == b"RIFF" and w[8:12] == b"WAVE"
+
+
+def test_vdf_and_steam(tmp_path):
+    lib = tmp_path / ".local/share/Steam"
+    (lib / "steamapps/common/Baldurs Gate 3").mkdir(parents=True)
+    (lib / "steamapps/libraryfolders.vdf").write_text(
+        '"libraryfolders" { "0" { "path" "%s" } }' % lib)
+    assert parse_vdf('"a" { "b" "c" }') == {"a": {"b": "c"}}
+    g = find_bg3(tmp_path)
+    assert g and g.game_dir.name == "Baldurs Gate 3"
+
+
+def test_split_and_qc():
+    sr = 40000
+    t = np.arange(sr * 3) / sr
+    tone = 0.5 * np.sin(2 * np.pi * 200 * t).astype("float32")
+    x = np.concatenate([tone, np.zeros(sr), tone])
+    clips = split_on_silence(x, sr)
+    assert len(clips) == 2
+    assert qc_report(clips, sr).clips == 2
+
+
+def test_install(tmp_path):
+    mod = build_mod(tmp_path / "out", "Test Mod", {"v1.wem": b"abc"})
+    app = tmp_path / "app"
+    install_mod(app, mod)
+    install_mod(app, mod)  # idempotent
+    ms = (app / "PlayerProfiles/Public/modsettings.lsx").read_text()
+    assert ms.count(mod.uuid) == 1
+
+
+@pytest.mark.skipif(not __import__("shutil").which("ffmpeg"), reason="needs ffmpeg")
+def test_full_pipeline_fake_engine(tmp_path, monkeypatch):
+    # fake game: Voice.pak with two wem lines (PCM wem is decodable by ffmpeg)
+    game = tmp_path / "game"
+    voice = game / "Data/Localization/English"
+    voice.mkdir(parents=True)
+    wems = {f"Localization/English/Voice/v{i}abcdef01.wem": pcm_to_wem(np.random.uniform(-.3, .3, 24000).astype("float32"), 24000) for i in range(2)}
+    write_pak(voice / "Voice.pak", wems)
+    appdata = tmp_path / "appdata"
+    (tmp_path / "speakers.json").write_text(json.dumps({"Hero": [f"v{i}abcdef01" for i in range(2)]}))
+    # user recordings
+    t = np.arange(40000 * 12) / 40000
+    sf.write(str(tmp_path / "me.wav"), (0.4 * np.sin(2 * np.pi * 180 * t) * (np.sin(2 * np.pi * 0.2 * t) > -0.3)).astype("float32"), 40000)
+
+    class S: game_dir = str(game); bg3_appdata = str(appdata)
+    p = Project.create("t", base=tmp_path / "proj", speaker="Hero", speaker_map=str(tmp_path / "speakers.json"),
+                       voice_inputs=[str(tmp_path / "me.wav")])
+    msgs = []
+    run_stages(pipeline.STAGES, Context(p, lambda f, m: msgs.append(m), threading.Event(), S()))
+    assert list((appdata / "Mods").glob("*.pak"))
+    assert (p.root / "state/install.done").exists()
