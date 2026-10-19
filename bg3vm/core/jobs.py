@@ -1,12 +1,14 @@
 """Resumable stage runner: each stage drops a '.done' marker and is skipped next time."""
 from __future__ import annotations
 
+import logging
 import threading
 from dataclasses import dataclass
 from typing import Callable
 
 from .project import Project
 
+log = logging.getLogger("bg3vm.jobs")
 Emit = Callable[[float, str], None]
 
 
@@ -41,5 +43,14 @@ def run_stages(stages: list[Stage], ctx: Context, force: set[str] | None = None,
             continue
         if on_stage:
             on_stage(i, len(stages), st.label)
-        st.run(ctx)
+        log.info("stage %s: start", st.name)
+        try:
+            st.run(ctx)
+        except Cancelled:
+            log.info("stage %s: cancelled", st.name)
+            raise
+        except Exception:
+            log.exception("stage %s: failed", st.name)
+            raise
+        log.info("stage %s: done", st.name)
         marker.touch()

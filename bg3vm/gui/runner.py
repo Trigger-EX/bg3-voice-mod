@@ -1,6 +1,7 @@
 """Runs pipeline stages on a worker thread and reports progress through Qt signals."""
 from __future__ import annotations
 
+import logging
 import threading
 
 from PySide6.QtCore import QObject, QThread, Signal
@@ -28,6 +29,7 @@ class _Worker(QThread):
         except Cancelled:
             self.cancelled.emit()
         except Exception as e:  # surfaced to the UI
+            logging.getLogger("bg3vm").exception("pipeline failed")
             self.failed.emit(f"{type(e).__name__}: {e}")
 
 

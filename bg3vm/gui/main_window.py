@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from PySide6.QtCore import QEventLoop, Qt, QTimer
@@ -10,6 +11,7 @@ from PySide6.QtWidgets import (
 )
 
 from bg3vm.core.config import Settings
+from bg3vm.core.logs import LOG_FILE
 from bg3vm.core.pipeline import STAGES
 from bg3vm.core.project import Project
 from bg3vm.engines import ENGINES
@@ -81,6 +83,7 @@ class MainWindow(QMainWindow):
         self.resize(1100, 720)
         self.settings = Settings.load()
         self.project = Project(name="my_voice_mod", root=Path.home() / ".local/share/bg3vm/projects/my_voice_mod")
+        self._stage_text = ""
         self.runner = JobRunner()
         self.runner.progress.connect(self._on_progress)
         self.runner.stage.connect(self._on_stage)
@@ -301,13 +304,18 @@ class MainWindow(QMainWindow):
 
     def _on_progress(self, frac, msg):
         self.bar.setValue(int(frac * 1000))
-        self.log.appendPlainText(msg)
+        if re.search(r"\d+/\d+$", msg):  # per-file counter: show in the label, don't spam the log
+            self.stage_lbl.setText(f"{self._stage_text}  ({msg.rsplit(' ', 1)[-1]})")
+        else:
+            self.log.appendPlainText(msg)
 
     def _on_stage(self, i, n, label):
-        self.stage_lbl.setText(f"Step {i + 1}/{n}: {label}")
+        self._stage_text = f"Step {i + 1}/{n}: {label}"
+        self.stage_lbl.setText(self._stage_text)
+        self.log.appendPlainText(self._stage_text)
 
     def _on_failed(self, msg):
-        self.log.appendPlainText(f"ERROR: {msg}")
+        self.log.appendPlainText(f"ERROR: {msg}\nDetails: {LOG_FILE}")
         self._finish("Failed. See log; fix the issue and run again to resume.")
 
     def _finish(self, text):

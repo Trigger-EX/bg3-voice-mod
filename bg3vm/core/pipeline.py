@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import soundfile as sf
@@ -10,12 +11,15 @@ from bg3vm.audio import dataset as ds
 from bg3vm.audio.vgmstream import decode_wem
 from bg3vm.audio.wem import wav_to_wem
 from bg3vm.core.jobs import Context, Stage
+from bg3vm.core.logs import LOG_FILE
 from bg3vm.engines import get_engine
 from bg3vm.game.lspk import PakReader
 from bg3vm.game.steam import GameInstall, find_bg3
 from bg3vm.game.voicemeta import index_voice_paks, lines_for_speaker
 from bg3vm.mod.install import install_mod
 from bg3vm.mod.package import build_mod, BuiltMod
+
+log = logging.getLogger("bg3vm.pipeline")
 
 
 def _game(ctx: Context) -> GameInstall:
@@ -49,13 +53,28 @@ def stage_extract(ctx: Context) -> None:
     p = ctx.project
     lines = json.loads((p.dir("index") / "lines.json").read_text())
     readers: dict[str, PakReader] = {}
+    failed: list[dict] = []
     for i, ln in enumerate(lines):
         ctx.check()
-        r = readers.setdefault(ln["pak"], PakReader(ln["pak"]))
-        wem = p.dir("orig_wem") / f"{ln['key']}.wem"
-        wem.write_bytes(r.read(ln["entry"]))
-        decode_wem(wem, p.dir("orig_wav") / f"{ln['key']}.wav")
+        wav = p.dir("orig_wav") / f"{ln['key']}.wav"
+        if not wav.exists():  # resume: skip lines already decoded
+            try:
+                r = readers.setdefault(ln["pak"], PakReader(ln["pak"]))
+                wem = p.dir("orig_wem") / f"{ln['key']}.wem"
+                wem.write_bytes(r.read(ln["entry"]))
+                decode_wem(wem, wav)
+            except Exception as e:
+                log.warning("extract failed for %s: %s", ln["key"], e, exc_info=True)
+                failed.append({"key": ln["key"], "error": str(e)})
+                wav.unlink(missing_ok=True)
         ctx.emit((i + 1) / len(lines), f"Extracting {i + 1}/{len(lines)}")
+    (p.dir("index") / "extract_failed.json").write_text(json.dumps(failed, indent=2))
+    if failed:
+        ctx.emit(1.0, f"{len(failed)} line(s) could not be decoded; they will keep the original audio (see log).")
+        dead = {f["key"] for f in failed}
+        (p.dir("index") / "lines.json").write_text(json.dumps([l for l in lines if l["key"] not in dead]))
+    if len(failed) > len(lines) * 0.2:
+        raise RuntimeError(f"{len(failed)} of {len(lines)} lines failed to decode; see {LOG_FILE}")
 
 
 def stage_dataset(ctx: Context) -> None:
