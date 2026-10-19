@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QEventLoop, Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow,
     QMessageBox, QPlainTextEdit, QProgressBar, QProgressDialog, QPushButton, QSpinBox,
@@ -125,18 +125,17 @@ class MainWindow(QMainWindow):
         self._vgm_thread = t = FuncThread(install_vgmstream)
         t.progress.connect(lambda f, m: (dlg.setValue(int(f * 100)), dlg.setLabelText(m)))
         outcome: dict = {}
-        t.result.connect(lambda _: outcome.update(ok=True))
-        t.failed.connect(lambda m: outcome.update(err=m))
-        t.finished.connect(dlg.close)
+        loop = QEventLoop()
+        t.result.connect(lambda _: (outcome.update(ok=True), loop.quit()))
+        t.failed.connect(lambda m: (outcome.update(err=m), loop.quit()))
         t.start()
-        while t.isRunning():
-            QApplication.processEvents()
-            t.wait(30)
+        loop.exec()  # returns when the worker reports a result or an error
+        t.wait()
         dlg.close()
         if outcome.get("ok"):
             self.log.appendPlainText("vgmstream installed.")
             return True
-        QMessageBox.warning(self, "vgmstream", f"Install failed: {outcome.get('err')}\n"
+        QMessageBox.warning(self, "vgmstream", f"Install failed: {outcome.get('err', 'unknown error')}\n"
                             "You can install it manually and make sure `vgmstream-cli` is on PATH.")
         return False
 
