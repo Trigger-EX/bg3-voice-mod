@@ -15,6 +15,7 @@ CONFIG_DIR = _xdg("XDG_CONFIG_HOME", ".config") / "bg3vm"
 DATA_DIR = _xdg("XDG_DATA_HOME", ".local/share") / "bg3vm"
 TOOLS_DIR = DATA_DIR / "tools"
 PROJECTS_DIR = DATA_DIR / "projects"
+CACHE_DIR = DATA_DIR / "cache"  # shared across projects: decoded original game audio
 
 
 @dataclass

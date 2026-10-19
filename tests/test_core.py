@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 import numpy as np
 import pytest
 import soundfile as sf
@@ -15,6 +16,12 @@ from bg3vm.mod.meta import pack_version64
 from bg3vm.mod.package import build_mod
 from bg3vm.mod.install import install_mod
 import threading
+
+
+@pytest.fixture(autouse=True)
+def _isolated_dirs(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(pipeline, "PROJECTS_DIR", tmp_path / "legacy_projects")
 
 
 def test_pak_roundtrip(tmp_path):
@@ -140,7 +147,7 @@ def test_changing_inputs_invalidates_old_work(tmp_path):
     p = Project.create("t", base=tmp_path / "proj", speaker="Astarion", voice_inputs=[str(tmp_path / "me.wav")])
     ctx = Context(p, lambda f, m: None, threading.Event(), S())
     run_stages(pipeline.STAGES, ctx)
-    first = {x.name for x in (p.root / "orig_wav").glob("*.wav")}
+    first = {Path(l["wav"]).name for l in json.loads((p.root / "index/lines.json").read_text())}
     assert len(first) == 2 and all(A in n for n in first)
     # unchanged settings: nothing re-runs (dataset marker stays, clips untouched)
     clip = next((p.root / "dataset").glob("*.wav")); mtime = clip.stat().st_mtime_ns
@@ -150,6 +157,42 @@ def test_changing_inputs_invalidates_old_work(tmp_path):
     p.speaker = "Gale"
     run_stages(pipeline.STAGES, ctx)
     assert clip.stat().st_mtime_ns == mtime  # recordings/training don't depend on the character
-    second = {x.name for x in (p.root / "orig_wav").glob("*.wav")}
+    second = {Path(l["wav"]).name for l in json.loads((p.root / "index/lines.json").read_text())}
     assert len(second) == 2 and all(B in n for n in second)
     assert {x.name for x in (p.root / "new_wem").glob("*.wem")} == {n.replace(".wav", ".wem") for n in second}
+
+
+@pytest.mark.skipif(not __import__("shutil").which("ffmpeg"), reason="needs ffmpeg")
+def test_extraction_shared_between_projects(tmp_path, monkeypatch):
+    SPK = "c7c13742bacd460a8f65f864fe41f255"
+    voice = tmp_path / "game/Data/Localization/English"
+    voice.mkdir(parents=True)
+    w = pcm_to_wem(np.random.uniform(-.3, .3, 24000).astype("float32"), 24000)
+    write_pak(voice / "Voice.pak", {f"Mods/G/v{SPK}_h{i}g1.wem": w for i in range(3)})
+
+    class S: game_dir = str(tmp_path / "game"); bg3_appdata = ""
+    decoded = []
+    real = pipeline.decode_wem
+    monkeypatch.setattr(pipeline, "decode_wem", lambda a, b: (decoded.append(a), real(a, b)))
+
+    def extract_only(name):
+        p = Project.create(name, base=tmp_path / "proj", speaker="Astarion")
+        run_stages(pipeline.STAGES[:2], Context(p, lambda f, m: None, threading.Event(), S()))
+        return p
+
+    extract_only("one")
+    assert len(decoded) == 3
+    p2 = extract_only("two")  # new project: everything comes from the shared cache
+    assert len(decoded) == 3
+    assert all(Path(l["wav"]).exists() for l in json.loads((p2.root / "index/lines.json").read_text()))
+
+
+def test_legacy_project_audio_is_imported(tmp_path):
+    old = tmp_path / "legacy_projects/old/orig_wav"
+    old.mkdir(parents=True)
+    (old / "vX_h1.wav").write_bytes(b"RIFFfake")
+    got = pipeline._legacy_wavs()
+    assert "vX_h1" in got
+    dst = tmp_path / "c.wav"
+    pipeline._link_or_copy(got["vX_h1"], dst)
+    assert dst.read_bytes() == b"RIFFfake"

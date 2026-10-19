@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import shutil
+import tempfile
 from pathlib import Path
 
 import soundfile as sf
@@ -10,6 +13,7 @@ import soundfile as sf
 from bg3vm.audio import dataset as ds
 from bg3vm.audio.vgmstream import decode_wem
 from bg3vm.audio.wem import wav_to_wem
+from bg3vm.core.config import CACHE_DIR, PROJECTS_DIR
 from bg3vm.core.jobs import Context, Skip, Stage
 from bg3vm.core.logs import LOG_FILE
 from bg3vm.engines import get_engine
@@ -48,32 +52,71 @@ def stage_index(ctx: Context) -> None:
     ctx.emit(1.0, f"{len(lines)} lines for {p.speaker}")
 
 
+def _cache_dir(pak: str) -> Path:
+    """Decoded audio is cached per pak build (name, size, mtime), so a game update never serves stale audio."""
+    st = os.stat(pak)
+    return CACHE_DIR / "orig_wav" / f"{Path(pak).stem}-{st.st_size}-{int(st.st_mtime)}"
+
+
+def _link_or_copy(src: Path, dst: Path) -> None:
+    tmp = dst.with_name(dst.name + ".tmp")
+    try:
+        os.link(src, tmp)
+    except OSError:
+        shutil.copy2(src, tmp)
+    os.replace(tmp, dst)
+
+
+def _legacy_wavs() -> dict[str, Path]:
+    """Audio decoded by earlier versions lives inside each project; reuse it instead of decoding again."""
+    return {f.stem: f for d in PROJECTS_DIR.glob("*/orig_wav") for f in d.glob("*.wav")}
+
+
 def stage_extract(ctx: Context) -> None:
     p = ctx.project
     lines = json.loads((p.dir("index") / "lines.json").read_text())
     readers: dict[str, PakReader] = {}
+    legacy: dict[str, Path] | None = None
     failed: list[dict] = []
+    reused = 0
     for i, ln in enumerate(lines):
         ctx.check()
-        wav = p.dir("orig_wav") / f"{ln['key']}.wav"
-        if not wav.exists():  # resume: skip lines already decoded
+        cdir = _cache_dir(ln["pak"])
+        cdir.mkdir(parents=True, exist_ok=True)
+        wav = cdir / f"{ln['key']}.wav"
+        ln["wav"] = str(wav)
+        if wav.exists():
+            reused += 1
+        else:
             try:
-                r = readers.setdefault(ln["pak"], PakReader(ln["pak"]))
-                wem = p.dir("orig_wem") / f"{ln['key']}.wem"
-                wem.write_bytes(r.read(ln["entry"]))
-                decode_wem(wem, wav)
+                if legacy is None:
+                    legacy = _legacy_wavs()
+                if ln["key"] in legacy:
+                    _link_or_copy(legacy[ln["key"]], wav)
+                    reused += 1
+                else:
+                    r = readers.setdefault(ln["pak"], PakReader(ln["pak"]))
+                    with tempfile.TemporaryDirectory(dir=p.dir("tmp")) as td:
+                        wem = Path(td) / f"{ln['key']}.wem"
+                        part = Path(td) / f"{ln['key']}.wav"
+                        wem.write_bytes(r.read(ln["entry"]))
+                        decode_wem(wem, part)
+                        shutil.move(str(part), str(wav) + ".tmp")  # never leave a half-written cache file
+                        os.replace(str(wav) + ".tmp", wav)
             except Exception as e:
                 log.warning("extract failed for %s: %s", ln["key"], e, exc_info=True)
                 failed.append({"key": ln["key"], "error": str(e)})
-                wav.unlink(missing_ok=True)
+                ln["wav"] = ""
         ctx.emit((i + 1) / len(lines), f"Extracting {i + 1}/{len(lines)}")
     (p.dir("index") / "extract_failed.json").write_text(json.dumps(failed, indent=2))
+    lines = [l for l in lines if l["wav"]]
+    (p.dir("index") / "lines.json").write_text(json.dumps(lines))
+    if reused:
+        ctx.emit(1.0, f"Reused {reused} previously extracted lines from the shared cache.")
     if failed:
-        ctx.emit(1.0, f"{len(failed)} line(s) could not be decoded; they will keep the original audio (see log).")
-        dead = {f["key"] for f in failed}
-        (p.dir("index") / "lines.json").write_text(json.dumps([l for l in lines if l["key"] not in dead]))
-    if len(failed) > len(lines) * 0.2:
-        raise RuntimeError(f"{len(failed)} of {len(lines)} lines failed to decode; see {LOG_FILE}")
+        ctx.emit(1.0, f"{len(failed)} line(s) could not be decoded and were skipped (see log).")
+    if len(failed) > (len(lines) + len(failed)) * 0.2:
+        raise RuntimeError(f"{len(failed)} lines failed to decode; see {LOG_FILE}")
 
 
 def stage_dataset(ctx: Context) -> None:
@@ -99,7 +142,7 @@ def stage_convert(ctx: Context) -> None:
     p = ctx.project
     eng = _engine(ctx)
     lines = json.loads((p.dir("index") / "lines.json").read_text())
-    wavs = [p.dir("orig_wav") / f"{ln['key']}.wav" for ln in lines]
+    wavs = [Path(ln["wav"]) for ln in lines]
     for i, w in enumerate(wavs):
         ctx.check()
         dst = p.dir("conv_wav") / w.name
@@ -113,7 +156,7 @@ def stage_encode(ctx: Context) -> None:
     lines = json.loads((p.dir("index") / "lines.json").read_text())
     for i, ln in enumerate(lines):
         ctx.check()
-        orig = sf.info(str(p.dir("orig_wav") / f"{ln['key']}.wav"))
+        orig = sf.info(ln["wav"])
         data = wav_to_wem(p.dir("conv_wav") / f"{ln['key']}.wav", orig.samplerate, orig.channels)
         (p.dir("new_wem") / f"{ln['key']}.wem").write_bytes(data)
         ctx.emit((i + 1) / len(lines), f"Encoding {i + 1}/{len(lines)}")
@@ -155,7 +198,7 @@ def _inputs_fp(p) -> list:
 STAGES = [
     Stage("index", "Find voice lines", stage_index,
           key=lambda p: [p.speaker.lower(), p.max_lines], outputs=("index",)),
-    Stage("extract", "Extract original audio", stage_extract, deps=("index",), outputs=("orig_wem", "orig_wav")),
+    Stage("extract", "Extract original audio", stage_extract, deps=("index",)),
     Stage("dataset", "Prepare your recordings", stage_dataset,
           key=_inputs_fp, outputs=("dataset", "tmp", "qc.json")),
     Stage("train", "Train voice model", stage_train,
