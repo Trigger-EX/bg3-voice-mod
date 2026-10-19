@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'Before answering the first message, load the modop and cp skills with the Skill tool if they are available and not already loaded in this session.'"
+          }
+        ]
+      }
+    ]
+  }
+}
