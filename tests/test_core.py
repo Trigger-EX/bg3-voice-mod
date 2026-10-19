@@ -124,3 +124,32 @@ def test_install_skipped_without_prefix(tmp_path, monkeypatch):
     run_stages([pl.STAGES[-1]], Context(p, lambda f, m: msgs.append(m), threading.Event(), S()))
     assert not (p.root / "state/install.done").exists()
     assert "not installed" in msgs[-1]
+
+
+@pytest.mark.skipif(not __import__("shutil").which("ffmpeg"), reason="needs ffmpeg")
+def test_changing_inputs_invalidates_old_work(tmp_path):
+    A, B = "c7c13742bacd460a8f65f864fe41f255", "ad9af97d75da406aae137071c563f604"  # Astarion, Gale
+    voice = tmp_path / "game/Data/Localization/English"
+    voice.mkdir(parents=True)
+    w = pcm_to_wem(np.random.uniform(-.3, .3, 24000).astype("float32"), 24000)
+    write_pak(voice / "Voice.pak", {f"Mods/G/v{s}_h{i}g1.wem": w for s in (A, B) for i in range(2)})
+    t = np.arange(40000 * 12) / 40000
+    sf.write(str(tmp_path / "me.wav"), (0.4 * np.sin(2 * np.pi * 180 * t) * (np.sin(2 * np.pi * 0.2 * t) > -0.3)).astype("float32"), 40000)
+
+    class S: game_dir = str(tmp_path / "game"); bg3_appdata = str(tmp_path / "ad")
+    p = Project.create("t", base=tmp_path / "proj", speaker="Astarion", voice_inputs=[str(tmp_path / "me.wav")])
+    ctx = Context(p, lambda f, m: None, threading.Event(), S())
+    run_stages(pipeline.STAGES, ctx)
+    first = {x.name for x in (p.root / "orig_wav").glob("*.wav")}
+    assert len(first) == 2 and all(A in n for n in first)
+    # unchanged settings: nothing re-runs (dataset marker stays, clips untouched)
+    clip = next((p.root / "dataset").glob("*.wav")); mtime = clip.stat().st_mtime_ns
+    run_stages(pipeline.STAGES, ctx)
+    assert clip.stat().st_mtime_ns == mtime
+    # new character: old audio is wiped, downstream redone, dataset (independent of speaker) kept
+    p.speaker = "Gale"
+    run_stages(pipeline.STAGES, ctx)
+    assert clip.stat().st_mtime_ns == mtime  # recordings/training don't depend on the character
+    second = {x.name for x in (p.root / "orig_wav").glob("*.wav")}
+    assert len(second) == 2 and all(B in n for n in second)
+    assert {x.name for x in (p.root / "new_wem").glob("*.wem")} == {n.replace(".wav", ".wem") for n in second}

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -18,6 +19,7 @@ class Project:
     preset: str = "good"
     transpose: int = 0
     max_lines: int = 0  # 0 = all
+    mod_uuid: str = field(default_factory=lambda: str(uuid.uuid4()))
 
     def dir(self, *parts: str) -> Path:
         d = self.root.joinpath(*parts)
@@ -34,7 +36,7 @@ class Project:
     def load(cls, root: Path) -> "Project":
         data = json.loads((Path(root) / "project.json").read_text())
         data["root"] = Path(data["root"])
-        return cls(**data)
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
     @classmethod
     def create(cls, name: str, base: Path | None = None, **kw) -> "Project":

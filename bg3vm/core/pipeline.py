@@ -98,7 +98,8 @@ def stage_train(ctx: Context) -> None:
 def stage_convert(ctx: Context) -> None:
     p = ctx.project
     eng = _engine(ctx)
-    wavs = sorted(p.dir("orig_wav").glob("*.wav"))
+    lines = json.loads((p.dir("index") / "lines.json").read_text())
+    wavs = [p.dir("orig_wav") / f"{ln['key']}.wav" for ln in lines]
     for i, w in enumerate(wavs):
         ctx.check()
         dst = p.dir("conv_wav") / w.name
@@ -122,7 +123,7 @@ def stage_package(ctx: Context) -> None:
     p = ctx.project
     lines = json.loads((p.dir("index") / "lines.json").read_text())
     wems = {ln["entry"]: (p.dir("new_wem") / f"{ln['key']}.wem").read_bytes() for ln in lines}
-    mod = build_mod(p.dir("out"), f"{p.name}", wems)
+    mod = build_mod(p.dir("out"), p.name, wems, p.mod_uuid)
     (p.dir("out") / "mod.json").write_text(json.dumps({**mod.__dict__, "pak": str(mod.pak), "zip": str(mod.zip)}))
     ctx.emit(1.0, f"Built {mod.pak.name}")
 
@@ -141,13 +142,28 @@ def stage_install(ctx: Context) -> None:
     ctx.emit(1.0, f"Installed to {dest}")
 
 
+def _inputs_fp(p) -> list:
+    """Recordings identified by path, size and mtime, so edits to the files also invalidate training."""
+    out = []
+    for raw in p.voice_inputs:
+        base = Path(raw)
+        files = [f for f in base.rglob("*") if f.is_file()] if base.is_dir() else [base]
+        out += [(str(f), f.stat().st_size, int(f.stat().st_mtime)) for f in sorted(files) if f.exists()]
+    return out
+
+
 STAGES = [
-    Stage("index", "Find voice lines", stage_index),
-    Stage("extract", "Extract original audio", stage_extract),
-    Stage("dataset", "Prepare your recordings", stage_dataset),
-    Stage("train", "Train voice model", stage_train),
-    Stage("convert", "Convert lines", stage_convert),
-    Stage("encode", "Encode .wem", stage_encode),
-    Stage("package", "Build mod package", stage_package),
-    Stage("install", "Install into game", stage_install),
+    Stage("index", "Find voice lines", stage_index,
+          key=lambda p: [p.speaker.lower(), p.max_lines], outputs=("index",)),
+    Stage("extract", "Extract original audio", stage_extract, deps=("index",), outputs=("orig_wem", "orig_wav")),
+    Stage("dataset", "Prepare your recordings", stage_dataset,
+          key=_inputs_fp, outputs=("dataset", "tmp", "qc.json")),
+    Stage("train", "Train voice model", stage_train,
+          key=lambda p: [p.engine, p.preset], deps=("dataset",), outputs=("model",)),
+    Stage("convert", "Convert lines", stage_convert, key=lambda p: p.transpose,
+          deps=("train", "extract"), outputs=("conv_wav",)),
+    Stage("encode", "Encode .wem", stage_encode, deps=("convert",), outputs=("new_wem",)),
+    Stage("package", "Build mod package", stage_package, key=lambda p: p.name,
+          deps=("encode",), outputs=("out",)),
+    Stage("install", "Install into game", stage_install, always=True, deps=("package",)),
 ]

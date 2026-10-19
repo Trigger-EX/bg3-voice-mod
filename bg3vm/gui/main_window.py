@@ -6,12 +6,12 @@ from pathlib import Path
 from PySide6.QtCore import QEventLoop, Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow,
     QMessageBox, QPlainTextEdit, QProgressBar, QProgressDialog, QPushButton, QSpinBox,
     QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from bg3vm.core.config import Settings
+from bg3vm.core.config import PROJECTS_DIR, Settings
 from bg3vm.core.logs import LOG_FILE
 from bg3vm.core.pipeline import STAGES
 from bg3vm.core.project import Project
@@ -83,7 +83,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("BG3 Voice Forge")
         self.resize(1100, 720)
         self.settings = Settings.load()
-        self.project = Project(name="my_voice_mod", root=Path.home() / ".local/share/bg3vm/projects/my_voice_mod")
+        self.project = Project(name="", root=PROJECTS_DIR / "_none")
         self._stage_text = ""
         self.runner = JobRunner()
         self.runner.progress.connect(self._on_progress)
@@ -244,6 +244,12 @@ class MainWindow(QMainWindow):
         self.stage_lbl = QLabel("Ready")
         self.bar = QProgressBar()
         self.bar.setRange(0, 1000)
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("Mod name (default: <character>_voice). Each name keeps its own work.")
+        self.fresh = QCheckBox("Start from scratch (ignore previous work for this mod name)")
+        cl.addWidget(QLabel("Mod name"))
+        cl.addWidget(self.name_edit)
+        cl.addWidget(self.fresh)
         self.go = QPushButton("Make my mod")
         self.go.setObjectName("primary")
         self.go.clicked.connect(self._start)
@@ -254,7 +260,7 @@ class MainWindow(QMainWindow):
         row.addWidget(self.go)
         row.addWidget(self.cancel_btn)
         row.addStretch(1)
-        for label, target in [("Open mod folder", lambda: self._open(self.project.dir("out"))),
+        for label, target in [("Open mod folder", lambda: self._open(self.project.dir("out") if self.project.root.exists() else PROJECTS_DIR)),
                               ("Open logs", lambda: self._open(LOG_FILE.parent))]:
             b = QPushButton(label)
             b.clicked.connect(target)
@@ -281,6 +287,7 @@ class MainWindow(QMainWindow):
             else "Game not auto-detected; choose the folders.")
 
     def _open(self, path: Path):
+        path.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     def _pick_dir(self, edit):
@@ -311,7 +318,10 @@ class MainWindow(QMainWindow):
         s.game_dir = self.game_edit.text()
         s.bg3_appdata = self.appdata_edit.text().strip()
         s.save()
-        p = self.project
+        name = re.sub(r"[^A-Za-z0-9_-]+", "_", self.name_edit.text().strip() or f"{speaker}_voice").strip("_")
+        root = PROJECTS_DIR / name
+        p = Project.load(root) if (root / "project.json").exists() else Project.create(name)
+        self.project = p
         p.speaker = speaker
         p.voice_inputs = list(self.files)
         p.engine = self.engine_box.currentData()
@@ -319,7 +329,7 @@ class MainWindow(QMainWindow):
         p.save()
         self.go.setEnabled(False)
         self.cancel_btn.setEnabled(True)
-        self.runner.start(p, s)
+        self.runner.start(p, s, {st.name for st in STAGES} if self.fresh.isChecked() else None)
 
     def _on_progress(self, frac, msg):
         self.bar.setValue(int(frac * 1000))
