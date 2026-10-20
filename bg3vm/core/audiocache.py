@@ -1,10 +1,12 @@
 """Decoded original game audio, cached across projects (and used for sample previews)."""
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import tempfile
 import threading
+import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Callable
@@ -12,6 +14,8 @@ from typing import Callable
 from bg3vm.audio.vgmstream import decode_wem, decode_wems
 from bg3vm.core.config import CACHE_DIR
 from bg3vm.game.lspk import PakReader
+
+log = logging.getLogger("bg3vm.cache")
 
 
 def cache_dir(pak: str) -> Path:
@@ -42,7 +46,7 @@ def decode_to_cache(pak: str, entry: str, key: str, reader: PakReader | None = N
 
 def decode_many_to_cache(items: list[tuple[str, str, str]], progress: Callable[[int, int], None],
                          cancel: threading.Event | None = None, tmp_root: Path | None = None,
-                         workers: int | None = None, chunk: int = 24) -> list[tuple[str, str]]:
+                         workers: int | None = None, chunk: int = 8) -> list[tuple[str, str]]:
     """Decode (pak, entry, key) items into the cache using all CPU cores, several files per decoder call.
 
     Returns [(key, error)] for items that failed. progress(done, total) is called from the calling thread.
@@ -58,6 +62,8 @@ def decode_many_to_cache(items: list[tuple[str, str, str]], progress: Callable[[
 
     def work(batch):
         bad: list[tuple[str, str]] = []
+        t0 = time.monotonic()
+        log.debug("batch start: %d files (first %s)", len(batch), batch[0][2])
         with tempfile.TemporaryDirectory(dir=tmp_root) as td:
             wems = []
             for pak, entry, key in batch:
@@ -72,23 +78,48 @@ def decode_many_to_cache(items: list[tuple[str, str, str]], progress: Callable[[
                 dst = cached_path(pak, key)
                 shutil.move(str(w) + ".wav", str(dst) + ".tmp")
                 os.replace(str(dst) + ".tmp", dst)
+        took = time.monotonic() - t0
+        (log.warning if took > 30 else log.debug)("batch done: %d files in %.1fs", len(batch), took)
         return bad
 
+    # Few workers: decoding is cheap, and many threads seeking around one huge pak file thrash the disk.
+    workers = workers or min(os.cpu_count() or 2, 8)
     batches = [items[i : i + chunk] for i in range(0, len(items), chunk)]
-    done = 0
-    with ThreadPoolExecutor(max_workers=workers or os.cpu_count() or 2) as ex:
+    done, last_progress, last_beat = 0, time.monotonic(), 0.0
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="decode") as ex:
         pending = {ex.submit(work, b): len(b) for b in batches}
         try:
             while pending:
                 finished, _ = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
                 if cancel is not None and cancel.is_set():
                     raise Cancelled()
+                now = time.monotonic()
                 for f in finished:
                     done += pending.pop(f)
                     failures += f.result()
                     progress(done, len(items))
+                    last_progress = now
+                if not finished and now - last_progress > 30 and now - last_beat > 30:
+                    last_beat = now
+                    _log_stall(done, len(items), now - last_progress)
         except BaseException:
             for f in pending:
                 f.cancel()
             raise
     return failures
+
+
+def _log_stall(done: int, total: int, idle: float) -> None:
+    """No batch finished for a while: record what the workers and decoder processes are doing."""
+    import subprocess
+    import sys
+    import traceback
+
+    procs = subprocess.run(["pgrep", "-a", "vgmstream|ffmpeg"], capture_output=True, text=True).stdout.strip()
+    stacks = []
+    for tid, frame in sys._current_frames().items():
+        name = next((t.name for t in threading.enumerate() if t.ident == tid), str(tid))
+        if name.startswith("decode"):
+            stacks.append(f"--- {name}\n" + "".join(traceback.format_stack(frame)[-4:]))
+    log.warning("extraction stalled: %d/%d done, nothing finished for %.0fs.\ndecoder processes:\n%s\n%s",
+                done, total, idle, procs or "(none running)", "\n".join(stacks))

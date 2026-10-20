@@ -81,7 +81,7 @@ def decode_wem(wem: Path, wav: Path) -> None:
         cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", str(wem), str(wav)]
     else:
         raise RuntimeError("vgmstream-cli (or ffmpeg) is required to decode .wem files")
-    subprocess.run(cmd, check=True, capture_output=True)
+    subprocess.run(cmd, check=True, capture_output=True, timeout=120)
 
 
 def decode_wems(wems: list[Path]) -> dict[Path, str | None]:
@@ -93,7 +93,10 @@ def decode_wems(wems: list[Path]) -> dict[Path, str | None]:
     out_for = lambda w: w.with_name(w.name + ".wav")
     tool = find_vgmstream()
     if tool and wems:
-        subprocess.run([tool, *map(str, wems)], capture_output=True)  # default output: '<infile>.wav'
+        try:  # default output: '<infile>.wav'; the timeout guarantees a wedged decoder can't stall the run
+            subprocess.run([tool, *map(str, wems)], capture_output=True, timeout=60 + 5 * len(wems))
+        except subprocess.TimeoutExpired:
+            pass  # fall through: anything missing is retried one by one below
     result: dict[Path, str | None] = {}
     for w in wems:
         if out_for(w).exists():
@@ -102,6 +105,8 @@ def decode_wems(wems: list[Path]) -> dict[Path, str | None]:
         try:  # missing output: batch failed (or no vgmstream); retry alone to get a real error message
             decode_wem(w, out_for(w))
             result[w] = None
+        except subprocess.TimeoutExpired:
+            result[w] = "decoder timed out"
         except subprocess.CalledProcessError as e:
             result[w] = (e.stderr or b"").decode(errors="replace").strip()[-300:] or f"decoder exit {e.returncode}"
         except Exception as e:
