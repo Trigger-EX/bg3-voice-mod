@@ -14,10 +14,10 @@ class InstallWindow(QDialog):
         self.setWindowTitle("Downloading voice engine")
         self.setModal(False)
         self.resize(640, 420)
-        eng = installer.engine
         lay = QVBoxLayout(self)
-        title = QLabel(f"<b>{eng.label}</b><br>One-time download ({eng.install_size_hint}). The steps that don't "
-                       "need it keep running; training waits here if the download isn't finished yet.")
+        parts = "<br>".join(f"<b>{p.label}</b> ({p.install_size_hint})" for p in installer.parts)
+        title = QLabel(f"{parts}<br>One-time download. The steps that don't need it keep running; "
+                       "the steps that do wait here if the download isn't finished yet.")
         title.setWordWrap(True)
         self.stage = QLabel("Starting…")
         self.bar = QProgressBar()

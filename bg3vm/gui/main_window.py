@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 from PySide6.QtCore import QEventLoop, Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QMainWindow,
-    QMessageBox, QPlainTextEdit, QProgressBar, QProgressDialog, QPushButton, QSpinBox,
+    QMessageBox, QPlainTextEdit, QProgressBar, QProgressDialog, QPushButton, QScrollArea, QSpinBox,
     QStackedWidget, QVBoxLayout, QWidget,
 )
 
@@ -22,6 +23,7 @@ from bg3vm.game.steam import GameInstall, find_bg3, search_appdata
 from bg3vm.audio.pitch import median_f0
 from bg3vm.core.audiocache import decode_to_cache
 from bg3vm.game.voicemeta import index_voice_paks, lines_for_speaker, list_speakers, sample_lines
+from bg3vm.accent.tts import AccentTTS, espeak_installed
 from bg3vm.core.background import BackgroundInstall
 from bg3vm.gui.install_dialog import InstallWindow
 from bg3vm.gui.player import Player
@@ -317,6 +319,27 @@ class MainWindow(QMainWindow):
         self.preset_box.setCurrentIndex(1)
         cl.addWidget(QLabel("Training quality"))
         cl.addWidget(self.preset_box)
+        self.accent_box = QComboBox()
+        self.accent_box.addItem("Keep the original accent", "original")
+        self.accent_box.addItem("American English (experimental)", "american")
+        self.accent_voice_box = QComboBox()
+        for label, key in [("Auto (match the original speaker)", "auto"), ("Male speech voice", "male"),
+                           ("Female speech voice", "female")]:
+            self.accent_voice_box.addItem(label, key)
+        self.accent_voice_box.setEnabled(False)
+        self.accent_box.currentIndexChanged.connect(
+            lambda _: self.accent_voice_box.setEnabled(self.accent_box.currentData() == "american"))
+        accent_note = QLabel(
+            "American mode re-speaks every line from its English text with an American voice, fitted to the "
+            "original timing, then converts it to your voice. Pronunciation becomes American (\"marked\", not "
+            "\"mocked\"), but some of the original actor's emotion and delivery is lost. Grunts, laughs and "
+            "one-word lines keep the original audio. Needs a ~0.6 GB download and the espeak-ng package.")
+        accent_note.setObjectName("muted")
+        accent_note.setWordWrap(True)
+        cl.addWidget(QLabel("Accent"))
+        cl.addWidget(self.accent_box)
+        cl.addWidget(self.accent_voice_box)
+        cl.addWidget(accent_note)
         self.auto_pitch = QCheckBox("Match pitch automatically (recommended)")
         self.auto_pitch.setChecked(True)
         self.pitch_spin = QSpinBox()
@@ -339,7 +362,11 @@ class MainWindow(QMainWindow):
         cl.addWidget(self.maxlines)
         lay.addWidget(c)
         lay.addStretch(1)
-        return w
+        scroll = QScrollArea()  # the page is taller than most windows; scroll instead of squeezing labels
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(w)
+        return scroll
 
     def _voice_page(self) -> QWidget:
         w, lay = page_shell()
@@ -396,6 +423,28 @@ class MainWindow(QMainWindow):
         self.log.setReadOnly(True)
         lay.addWidget(self.log, 1)
         return w
+
+    def _ensure_espeak(self) -> bool:
+        """The American-accent speech engine needs the espeak-ng system package."""
+        if espeak_installed():
+            return True
+        ok = QMessageBox.question(
+            self, "espeak-ng needed",
+            "The American accent feature needs the espeak-ng package.\n\nInstall it now? "
+            "(Asks for your password; or run `sudo apt install espeak-ng` yourself.)")
+        if ok != QMessageBox.Yes:
+            return False
+        try:
+            r = subprocess.run(["pkexec", "apt-get", "install", "-y", "espeak-ng"], capture_output=True, text=True)
+        except OSError as e:
+            r = None
+            err = str(e)
+        if espeak_installed():
+            return True
+        QMessageBox.warning(self, "espeak-ng", "Couldn't install it automatically. Please run:\n\n"
+                            "    sudo apt install espeak-ng\n\nthen click Make my mod again."
+                            + (f"\n\n{(r.stderr if r else err)[-300:]}" if (r or err) else ""))
+        return False
 
     # ---- saved voices
     def _refresh_voices(self):
@@ -501,22 +550,33 @@ class MainWindow(QMainWindow):
         p.voice_model = voice_model
         p.engine = self.engine_box.currentData()
         p.preset = self.preset_box.currentData()
+        p.accent = self.accent_box.currentData()
+        p.accent_voice = self.accent_voice_box.currentData()
         p.auto_pitch = self.auto_pitch.isChecked()
         p.transpose = self.pitch_spin.value()
         p.max_lines = self.maxlines.value()
         p.save()
         eng = ENGINES[p.engine]()
-        installer = self.installer if (self.installer and self.installer.running
-                                       and self.installer.engine.name == p.engine) else None
-        if installer is None and not eng.available()[0] and eng.install_size_hint:
+        if p.accent == "american" and not self._ensure_espeak():
+            return
+        needed = []
+        if not eng.available()[0] and eng.install_size_hint:  # converting needs it even for a saved voice
+            needed.append(eng)
+        tts = AccentTTS()
+        if p.accent == "american" and not tts.available()[0]:
+            needed.append(tts)
+        running = {x.name for x in self.installer.parts} if self.installer and self.installer.running else set()
+        installer = self.installer if running and all(n.name in running for n in needed) else None
+        if installer is None and needed:
+            what = "\n".join(f"• {n.label}: {n.install_size_hint}" for n in needed)
             ok = QMessageBox.question(
-                self, "Download voice engine",
-                f"{eng.label} needs a one-time download ({eng.install_size_hint}).\n\n"
-                "It starts now, in the background. The steps that don't need it (finding and extracting "
-                "voice lines, preparing your recordings) run meanwhile; training waits if needed. Continue?")
+                self, "Download required components",
+                f"This run needs one-time downloads:\n\n{what}\n\nThey start now, in the background. The steps "
+                "that don't need them (finding and extracting voice lines, preparing your recordings) run "
+                "meanwhile; steps that need them wait. Continue?")
             if ok != QMessageBox.Yes:
                 return
-            installer = self.installer = BackgroundInstall(eng)
+            installer = self.installer = BackgroundInstall(*needed)
             self.install_window = InstallWindow(self, installer)
             self.install_window.show()
             installer.start()

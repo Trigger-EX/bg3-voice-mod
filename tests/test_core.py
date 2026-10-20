@@ -1,4 +1,5 @@
 import json
+import sys
 from pathlib import Path
 import numpy as np
 import pytest
@@ -315,6 +316,9 @@ def test_wait_raises_when_install_fails_or_is_cancelled():
     from bg3vm.engines.fake import FakeEngine
 
     class Broken(FakeEngine):
+        def available(self):
+            return False, "not installed"
+
         def install(self, progress, cancel=None):
             raise RuntimeError("no network")
 
@@ -324,6 +328,9 @@ def test_wait_raises_when_install_fails_or_is_cancelled():
         b.wait(threading.Event(), poll=0.05)
 
     class Hang(FakeEngine):
+        def available(self):
+            return False, "not installed"
+
         def install(self, progress, cancel=None):
             threading.Event().wait(2)
 
@@ -371,3 +378,53 @@ def test_project_models_trained_earlier_are_listed(tmp_path):
     (m / "model.pth").write_bytes(b"x"); (m / "model.index").write_bytes(b"y")
     got = voices.list_voices("rvc", library=tmp_path / "nolib", projects=tmp_path / "projects")
     assert [(v.name, v.origin) for v in got] == [("old", "project")]
+
+
+STUB_WORKER = '''
+import json, sys, os
+import numpy as np, soundfile as sf
+spec = json.load(open(sys.argv[1]))
+for i, j in enumerate(spec["jobs"], 1):
+    n = int(24000 * (0.25 + 0.06 * len(j["text"].split())))
+    t = np.arange(n) / 24000
+    sf.write(j["out"], (0.3 * np.sin(2 * np.pi * 200 * t)).astype("float32"), 24000)
+    print(f"OK {i}/{len(spec['jobs'])} {j['key']}", flush=True)
+'''
+
+
+@pytest.mark.skipif(not __import__("shutil").which("ffmpeg"), reason="needs ffmpeg")
+def test_american_accent_stage_respeaks_and_keeps_timing(tmp_path, monkeypatch):
+    import soundfile as sf
+    from bg3vm.accent.tts import AccentTTS
+    from bg3vm.game.loca import build_loca
+
+    SPK = "c7c13742bacd460a8f65f864fe41f255"
+    loc = tmp_path / "game/Data/Localization/English"
+    loc.mkdir(parents=True)
+    # the "original" lines: 1.5 s of tone with 0.2 s silence either side, 48 kHz like the real game files
+    t = np.arange(int(48000 * 1.5)) / 48000
+    body = (0.3 * np.sin(2 * np.pi * 120 * t)).astype("float32")
+    orig = np.concatenate([np.zeros(9600, "float32"), body, np.zeros(9600, "float32")])
+    wem = pcm_to_wem(orig, 48000)
+    write_pak(loc / "Voice.pak", {f"Mods/G/v{SPK}_h{i}g1.wem": wem for i in range(3)})
+    write_pak(loc / "English.pak", {"Localization/English/english.loca": build_loca({
+        "h0g1": "I marked the <i>spot</i>, my friend, long ago.", "h1g1": "Hmm.", "h2g1": "[Laughs]"})})
+    worker = tmp_path / "stub_worker.py"
+    worker.write_text(STUB_WORKER)
+    monkeypatch.setattr(pipeline, "AccentTTS", lambda: AccentTTS(worker_cmd=[sys.executable, str(worker)]))
+
+    class S: game_dir = str(tmp_path / "game"); bg3_appdata = str(tmp_path / "ad")
+    t2 = np.arange(40000 * 12) / 40000
+    sf.write(str(tmp_path / "me.wav"), (0.4 * np.sin(2 * np.pi * 180 * t2) * (np.sin(2 * np.pi * 0.2 * t2) > -0.3)).astype("float32"), 40000)
+    p = Project.create("acc", base=tmp_path / "proj", engine="fake", speaker="Astarion", accent="american",
+                       voice_inputs=[str(tmp_path / "me.wav")])
+    msgs = []
+    run_stages(pipeline.STAGES, Context(p, lambda f, m: msgs.append(m), threading.Event(), S()))
+    got = sorted(x.name for x in (p.root / "accent_wav").glob("*.wav"))
+    assert got == [f"v{SPK}_h0g1.wav"]             # only the line with real words; "Hmm." and "[Laughs]" kept
+    fitted, sr = sf.read(str(p.root / "accent_wav" / got[0]))
+    assert sr == 48000 and len(fitted) == len(orig)  # exact original length
+    start = np.nonzero(np.abs(fitted) > 0.01)[0][0]
+    assert abs(start - 9600) < 600                   # speech starts where the original speech started
+    assert any("1 lines re-spoken" in m for m in msgs)
+    assert len(list((tmp_path / "ad/Mods").glob("acc.pak"))) == 1

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import shutil
 import tempfile
 from pathlib import Path
@@ -12,7 +13,9 @@ import soundfile as sf
 
 from bg3vm.audio import dataset as ds
 from bg3vm.audio.wem import wav_to_wem
+from bg3vm.accent.tts import AccentTTS, choose_voice
 from bg3vm.core import audiocache, voices
+from bg3vm.game import loca_text
 from bg3vm.core.config import PROJECTS_DIR
 from bg3vm.core.jobs import Context, Skip, Stage
 from bg3vm.core.logs import LOG_FILE
@@ -150,6 +153,74 @@ def stage_train(ctx: Context) -> None:
     ctx.emit(1.0, f"Voice saved to your library as '{p.name}' so you can reuse it: {saved}")
 
 
+def _accent_source(ctx: Context, ln: dict) -> Path:
+    """The audio fed to the voice model: the re-spoken American line if there is one, else the original."""
+    if ctx.project.accent == "american":
+        f = ctx.project.root / "accent_wav" / f"{ln['key']}.wav"
+        if f.exists():
+            return f
+    return Path(ln["wav"])
+
+
+def _accent_tts(ctx: Context) -> AccentTTS:
+    tts = AccentTTS()
+    if not tts.available()[0]:
+        if ctx.installer is not None:  # still downloading in the background
+            ctx.installer.wait(ctx.cancel, ctx.emit)
+        else:
+            tts.install(ctx.emit, ctx.cancel)
+    ok, why = tts.available()
+    if not ok:
+        raise RuntimeError(f"American-accent speech unavailable: {why}")
+    return tts
+
+
+def stage_accent(ctx: Context) -> None:
+    """Re-speak each line from its English text with an American voice, fitted to the original timing."""
+    p = ctx.project
+    if p.accent != "american":
+        ctx.emit(1.0, "Keeping the original accent.")
+        return
+    from bg3vm.accent.fit import fit_to_original
+    from bg3vm.audio.pitch import median_f0
+
+    lines = json.loads((p.dir("index") / "lines.json").read_text())
+    ctx.emit(0.0, "Reading line text from the game…")
+    texts = loca_text.load_texts(_game(ctx).data_dir, {l["handle"] for l in lines})
+    todo, tts_paths = [], {}
+    for ln in lines:
+        text = texts.get(ln["handle"], "")
+        if loca_text.speakable(text):
+            out = p.dir("accent_tmp") / f"{ln['key']}.tts.wav"
+            tts_paths[ln["key"]] = out
+            todo.append({"key": ln["key"], "text": text, "out": str(out)})
+    if not todo:
+        ctx.emit(1.0, "No lines with speakable text were found; keeping the original audio.")
+        return
+    voice = choose_voice(p.accent_voice, median_f0([Path(l["wav"]) for l in lines[:40]]))
+    ctx.emit(0.0, f"Re-speaking {len(todo)} of {len(lines)} lines with the American voice '{voice}'…")
+    tts = _accent_tts(ctx)
+    failed = dict(tts.synthesize(todo, voice, ctx.emit, ctx.cancel))
+    by_key = {l["key"]: l for l in lines}
+    ready = [k for k in tts_paths if k not in failed and tts_paths[k].exists()]
+    done = 0
+    with ThreadPoolExecutor(max_workers=min(os.cpu_count() or 2, 6)) as ex:
+        futs = {ex.submit(fit_to_original, Path(by_key[k]["wav"]), tts_paths[k], p.dir("accent_wav") / f"{k}.wav"): k
+                for k in ready}
+        for f in as_completed(futs):
+            ctx.check()
+            try:
+                f.result()
+            except Exception as e:
+                failed[futs[f]] = str(e)
+            done += 1
+            ctx.emit(done / len(futs), f"Fitting timing {done}/{len(futs)}")
+    for k, why in failed.items():
+        log.warning("accent failed for %s: %s", k, why)
+    ctx.emit(1.0, f"{len(todo) - len(failed)} lines re-spoken in American English; "
+                  f"{len(lines) - len(todo) + len(failed)} kept the original audio.")
+
+
 def stage_convert(ctx: Context) -> None:
     p = ctx.project
     eng = _engine(ctx)
@@ -159,9 +230,9 @@ def stage_convert(ctx: Context) -> None:
         from bg3vm.audio.pitch import median_f0, transpose_for
         info = voices.read_info(p.dir("model"))
         target = info.get("f0") or median_f0(sorted(p.dir("dataset").glob("*.wav"))[:60])
-        transpose = transpose_for(median_f0([Path(l["wav"]) for l in lines[:60]]), target)
+        transpose = transpose_for(median_f0([_accent_source(ctx, l) for l in lines[:60]]), target)
         ctx.emit(0.0, f"Automatic pitch shift: {transpose:+d} semitones")
-    pairs = [(Path(ln["wav"]), p.dir("conv_wav") / f"{ln['key']}.wav") for ln in lines]
+    pairs = [(_accent_source(ctx, ln), p.dir("conv_wav") / f"{ln['key']}.wav") for ln in lines]
     todo = [(s, d) for s, d in pairs if not d.exists()]
     if todo:
         eng.convert_batch(p.dir("model"), todo, transpose, ctx.emit, ctx.cancel)
@@ -218,10 +289,12 @@ STAGES = [
     Stage("dataset", "Prepare your recordings", stage_dataset,
           key=lambda p: ["saved", p.voice_model] if p.voice_model else _inputs_fp(p),
           outputs=("dataset", "tmp", "qc.json")),
+    Stage("accent", "Re-speak lines in American English", stage_accent,
+          key=lambda p: [p.accent, p.accent_voice], deps=("extract",), outputs=("accent_wav", "accent_tmp")),
     Stage("train", "Train voice model", stage_train,
           key=lambda p: [p.engine, p.preset, p.voice_model], deps=("dataset",), outputs=("model",)),
-    Stage("convert", "Convert lines", stage_convert, key=lambda p: [p.transpose, p.auto_pitch],
-          deps=("train", "extract"), outputs=("conv_wav",)),
+    Stage("convert", "Convert lines", stage_convert, key=lambda p: [p.transpose, p.auto_pitch, p.accent, p.accent_voice],
+          deps=("train", "extract", "accent"), outputs=("conv_wav",)),
     Stage("encode", "Encode .wem", stage_encode, deps=("convert",), outputs=("new_wem",)),
     Stage("package", "Build mod package", stage_package, key=lambda p: p.name,
           deps=("encode",), outputs=("out",)),

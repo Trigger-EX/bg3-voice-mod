@@ -11,8 +11,11 @@ log = logging.getLogger("bg3vm.background")
 
 
 class BackgroundInstall:
-    def __init__(self, engine):
+    def __init__(self, engine, *more):
+        """engine: the main installable (has .label, .install_size_hint, .install(), .available()).
+        more: further installables that run after it (e.g. the accent speech model)."""
         self.engine = engine
+        self.parts = [engine, *more]
         self.cancel = threading.Event()
         self.done = threading.Event()
         self.error: str | None = None
@@ -44,10 +47,15 @@ class BackgroundInstall:
 
     def _run(self) -> None:
         try:
-            self.engine.install(self._progress, self.cancel)
-            ok, why = self.engine.available()
-            if not ok:
-                self.error = f"install finished but the engine is still unavailable: {why}"
+            n = len(self.parts)
+            for i, part in enumerate(self.parts):
+                if part.available()[0]:
+                    continue
+                part.install(lambda f, m, i=i: self._progress((i + f) / n, m), self.cancel)
+                ok, why = part.available()
+                if not ok:
+                    self.error = f"{part.label}: install finished but it is still unavailable: {why}"
+                    break
         except Cancelled:
             self.error = "download was cancelled"
         except Exception as e:
