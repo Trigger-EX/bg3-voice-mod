@@ -72,38 +72,41 @@ def _legacy_wavs() -> dict[str, Path]:
 def stage_extract(ctx: Context) -> None:
     p = ctx.project
     lines = json.loads((p.dir("index") / "lines.json").read_text())
-    readers: dict[str, PakReader] = {}
     legacy: dict[str, Path] | None = None
-    failed: list[dict] = []
+    todo: list[tuple[str, str, str]] = []
     reused = 0
-    for i, ln in enumerate(lines):
+    for ln in lines:
         ctx.check()
-        cdir = _cache_dir(ln["pak"])
-        cdir.mkdir(parents=True, exist_ok=True)
-        wav = cdir / f"{ln['key']}.wav"
+        wav = audiocache.cached_path(ln["pak"], ln["key"])
+        wav.parent.mkdir(parents=True, exist_ok=True)
         ln["wav"] = str(wav)
         if wav.exists():
             reused += 1
+            continue
+        if legacy is None:
+            legacy = _legacy_wavs()
+        if ln["key"] in legacy:
+            _link_or_copy(legacy[ln["key"]], wav)
+            reused += 1
         else:
-            try:
-                if legacy is None:
-                    legacy = _legacy_wavs()
-                if ln["key"] in legacy:
-                    _link_or_copy(legacy[ln["key"]], wav)
-                    reused += 1
-                else:
-                    r = readers.setdefault(ln["pak"], PakReader(ln["pak"]))
-                    audiocache.decode_to_cache(ln["pak"], ln["entry"], ln["key"], r, p.dir("tmp"))
-            except Exception as e:
-                log.warning("extract failed for %s: %s", ln["key"], e, exc_info=True)
-                failed.append({"key": ln["key"], "error": str(e)})
-                ln["wav"] = ""
-        ctx.emit((i + 1) / len(lines), f"Extracting {i + 1}/{len(lines)}")
+            todo.append((ln["pak"], ln["entry"], ln["key"]))
+    if reused:
+        ctx.emit(1.0, f"Reused {reused} previously extracted lines from the shared cache.")
+    failed: list[dict] = []
+    if todo:
+        ctx.emit(0.0, f"Extracting {len(todo)} lines using {os.cpu_count() or 2} CPU threads…")
+        bad = audiocache.decode_many_to_cache(
+            todo, lambda d, n: ctx.emit(d / n, f"Extracting {d}/{n}"), ctx.cancel, p.dir("tmp"))
+        for key, err in bad:
+            log.warning("extract failed for %s: %s", key, err)
+            failed.append({"key": key, "error": err})
+    dead = {f["key"] for f in failed}
+    for ln in lines:
+        if ln["key"] in dead:
+            ln["wav"] = ""
     (p.dir("index") / "extract_failed.json").write_text(json.dumps(failed, indent=2))
     lines = [l for l in lines if l["wav"]]
     (p.dir("index") / "lines.json").write_text(json.dumps(lines))
-    if reused:
-        ctx.emit(1.0, f"Reused {reused} previously extracted lines from the shared cache.")
     if failed:
         ctx.emit(1.0, f"{len(failed)} line(s) could not be decoded and were skipped (see log).")
     if len(failed) > (len(lines) + len(failed)) * 0.2:

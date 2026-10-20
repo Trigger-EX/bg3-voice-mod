@@ -21,6 +21,7 @@ from bg3vm.game.steam import GameInstall, find_bg3, search_appdata
 from bg3vm.audio.pitch import median_f0
 from bg3vm.core.audiocache import decode_to_cache
 from bg3vm.game.voicemeta import index_voice_paks, lines_for_speaker, list_speakers, sample_lines
+from bg3vm.gui.install_dialog import InstallDialog
 from bg3vm.gui.player import Player
 from bg3vm.gui.runner import JobRunner
 from bg3vm.gui.workers import FuncThread
@@ -471,8 +472,11 @@ class MainWindow(QMainWindow):
             ok = QMessageBox.question(
                 self, "Download voice engine",
                 f"{eng.label} needs a one-time download ({eng.install_size_hint}).\n\n"
-                "It installs into the app's own folder and happens automatically as part of the run. Continue?")
+                "It installs into the app's own folder. Download it now?")
             if ok != QMessageBox.Yes:
+                return
+            if not InstallDialog(self, eng).run():  # download starts immediately, with a progress window
+                self.log.appendPlainText("Voice engine install was cancelled or failed.")
                 return
         self.go.setEnabled(False)
         self.cancel_btn.setEnabled(True)

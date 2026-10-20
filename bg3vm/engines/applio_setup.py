@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -52,8 +53,17 @@ def detect_hardware() -> dict:
     return {"kind": "cpu", "vram_mb": None}
 
 
+_frac = [0.0]  # fraction of the current install step; lets raw tool output show up in the progress window
+
+
+def _step(progress, frac: float, msg: str) -> None:
+    _frac[0] = frac
+    progress(frac, msg)
+
+
 def _run(cmd: list[str], progress, label: str, cancel: threading.Event | None, env=None, cwd=None) -> None:
     log.info("run: %s", " ".join(map(str, cmd)))
+    last_emit = 0.0
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
                             env=env, cwd=cwd, start_new_session=True)
     tail: list[str] = []
@@ -61,6 +71,10 @@ def _run(cmd: list[str], progress, label: str, cancel: threading.Event | None, e
         line = line.rstrip()
         tail = (tail + [line])[-30:]
         log.debug(line)
+        now = time.monotonic()
+        if line and now - last_emit > 0.2:  # throttle: tools can print thousands of lines
+            last_emit = now
+            progress(_frac[0], line[:200])
         if cancel is not None and cancel.is_set():
             os.killpg(proc.pid, 15)
             from bg3vm.core.jobs import Cancelled
@@ -71,7 +85,7 @@ def _run(cmd: list[str], progress, label: str, cancel: threading.Event | None, e
 
 def _download_source(progress, cancel=None) -> None:
     """Shallow git clone when git exists (smaller, records the commit); otherwise the GitHub zip."""
-    progress(0.02, "Downloading Applio…")
+    _step(progress, 0.02, "Downloading Applio…")
     shutil.rmtree(APPLIO_DIR, ignore_errors=True)
     if shutil.which("git"):
         try:
@@ -96,7 +110,7 @@ def _ensure_uv(progress, cancel) -> str:
         return uv
     exe = UV_VENV_DIR / "bin" / "uv"
     if not exe.exists():
-        progress(0.08, "Installing uv (Python manager)…")
+        _step(progress, 0.08, "Installing uv (Python manager)…")
         subprocess.run([sys.executable, "-m", "venv", str(UV_VENV_DIR)], check=True)
         _run([str(UV_VENV_DIR / "bin" / "pip"), "install", "uv"], progress, "uv install", cancel)
     return str(exe)
@@ -106,20 +120,20 @@ def install(progress, cancel: threading.Event | None = None) -> None:
     """Idempotent. Large download: PyTorch plus Applio's base models (several GB)."""
     TOOLS_DIR.mkdir(parents=True, exist_ok=True)
     hw = detect_hardware()
-    progress(0.0, f"Setting up the RVC engine ({hw['kind'].upper()} detected)…")
+    _step(progress, 0.0, f"Setting up the RVC engine ({hw['kind'].upper()} detected)…")
     if not (APPLIO_DIR / "core.py").exists():
         _download_source(progress, cancel)
     uv = _ensure_uv(progress, cancel)
     env = dict(os.environ, UV_HTTP_TIMEOUT="600")
     if not venv_python().exists():
-        progress(0.12, "Creating Python 3.12 environment…")
+        _step(progress, 0.12, "Creating Python environment…")
         _run([uv, "venv", str(VENV_DIR), "--python", os.environ.get("BG3VM_APPLIO_PYTHON", "3.12")], progress, "venv", cancel, env)
     req = APPLIO_DIR / "requirements-engine.txt"
     if not req.exists():
         req = APPLIO_DIR / "requirements.txt"
     attempts = [hw["kind"], "cpu"] if hw["kind"] != "cpu" else ["cpu"]
     for i, kind in enumerate(attempts):
-        progress(0.2, f"Installing PyTorch and dependencies ({kind}) — this takes a while…")
+        _step(progress, 0.2, f"Installing PyTorch and dependencies ({kind}) — this takes a while…")
         try:
             _run([uv, "pip", "install", "--python", str(venv_python()), "-r", str(req),
                   "--extra-index-url", TORCH_INDEX[kind], "--index-strategy", "unsafe-best-match"],
@@ -131,7 +145,7 @@ def install(progress, cancel: threading.Event | None = None) -> None:
             if i == len(attempts) - 1:
                 raise
             log.warning("install with %s wheels failed; falling back to CPU", kind)
-    progress(0.8, "Downloading base voice models (pretrained, pitch, embedder)…")
+    _step(progress, 0.8, "Downloading base voice models (pretrained, pitch, embedder)…")
     _run([str(venv_python()), "core.py", "prerequisites", "--no-exe"], progress, "model download", cancel,
          dict(env, APPLIO_CONFIG_DIR=str(CONFIG_DIR)), cwd=str(APPLIO_DIR))
     MARKER.write_text("ok")

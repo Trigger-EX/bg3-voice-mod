@@ -113,7 +113,8 @@ def test_appdata_found_in_other_library(tmp_path):
     default = tmp_path / ".local/share/Steam"
     (default / "steamapps/compatdata/1086940/pfx").mkdir(parents=True)
     ext = tmp_path / "media/EVO1/SteamLibrary"
-    (ext / "steamapps/common/Baldurs Gate 3").mkdir(parents=True)
+    (ext / "steamapps/common/Baldurs Gate 3/bin").mkdir(parents=True)
+    (ext / "steamapps/common/Baldurs Gate 3/bin/bg3.exe").write_text("")  # Windows build -> Proton prefix
     (default / "steamapps/libraryfolders.vdf").write_text('"libraryfolders" { "0" { "path" "%s" } "1" { "path" "%s" } }' % (default, ext))
     g = GameInstall.from_game_dir(ext / "steamapps/common/Baldurs Gate 3", home=tmp_path)
     assert g.appdata_dir and "compatdata/1086940" in str(g.appdata_dir)
@@ -172,8 +173,9 @@ def test_extraction_shared_between_projects(tmp_path, monkeypatch):
 
     class S: game_dir = str(tmp_path / "game"); bg3_appdata = ""
     decoded = []
-    real = audiocache.decode_wem
-    monkeypatch.setattr(audiocache, "decode_wem", lambda a, b: (decoded.append(a), real(a, b)))
+    real = audiocache.decode_many_to_cache
+    monkeypatch.setattr(audiocache, "decode_many_to_cache",
+                        lambda items, *a, **k: (decoded.extend(items), real(items, *a, **k))[1])
 
     def extract_only(name):
         p = Project.create(name, base=tmp_path / "proj", engine="fake", speaker="Astarion")
@@ -213,7 +215,10 @@ def test_native_linux_user_data_detection(tmp_path):
     (game / "Data").mkdir(parents=True)  # no bin/bg3.exe -> native build
     (lib / "steamapps/libraryfolders.vdf").write_text('"libraryfolders" { "0" { "path" "%s" } }' % lib)
     assert GameInstall(game, None).native
-    assert GameInstall.from_game_dir(game, home=tmp_path).appdata_dir is None  # nothing to go on: don't guess
+    default = tmp_path / ".local/share/Larian Studios/Baldur's Gate 3"
+    assert GameInstall.from_game_dir(game, home=tmp_path).appdata_dir == default  # confirmed native location
+    (lib / "steamapps/compatdata/1086940/pfx").mkdir(parents=True)  # leftover prefix must not win
+    assert GameInstall.from_game_dir(game, home=tmp_path).appdata_dir == default
     data = tmp_path / ".local/share/Larian Studios/Baldur's Gate 3"
     (data / "PlayerProfiles/Public").mkdir(parents=True)
     (data / "PlayerProfiles/Public/modsettings.lsx").write_text("<save/>")
@@ -222,7 +227,6 @@ def test_native_linux_user_data_detection(tmp_path):
     # a Windows build (bin/bg3.exe) prefers the Proton prefix when both exist
     (game / "bin").mkdir()
     (game / "bin/bg3.exe").write_text("")
-    (lib / "steamapps/compatdata/1086940/pfx").mkdir(parents=True)
     assert "compatdata" in str(GameInstall.from_game_dir(game, home=tmp_path).appdata_dir)
     assert not GameInstall(game, None).native
 
@@ -233,3 +237,15 @@ def test_voice_paks_found_in_unusual_layout(tmp_path):
     d.mkdir(parents=True)
     (d / "Voice.pak").write_bytes(b"x")
     assert [p.name for p in GameInstall(tmp_path, None).voice_paks()] == ["Voice.pak"]
+
+
+def test_parallel_decode_isolates_bad_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(audiocache, "CACHE_DIR", tmp_path / "cache")
+    good = pcm_to_wem(np.random.uniform(-.3, .3, 8000).astype("float32"), 24000)
+    write_pak(tmp_path / "V.pak", {f"v{i}.wem": (b"garbage" if i == 5 else good) for i in range(60)})
+    items = [(str(tmp_path / "V.pak"), f"v{i}.wem", f"k{i}") for i in range(60)]
+    seen = []
+    bad = audiocache.decode_many_to_cache(items, lambda d, n: seen.append(d), None, tmp_path, workers=4, chunk=7)
+    assert [k for k, _ in bad] == ["k5"]
+    assert seen[-1] == 60
+    assert all(audiocache.cached_path(str(tmp_path / "V.pak"), f"k{i}").exists() for i in range(60) if i != 5)

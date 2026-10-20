@@ -103,6 +103,11 @@ def steam_libraries(home: Path) -> list[Path]:
     return out
 
 
+def NATIVE_DEFAULT(home: Path) -> Path:
+    """Native Linux build user data (confirmed by a user of the native build)."""
+    return home / ".local/share/Larian Studios/Baldur's Gate 3"
+
+
 LARIAN_DIRNAMES = ("Baldur's Gate 3", "Baldurs Gate 3", "Baldur’s Gate 3")
 
 
@@ -135,16 +140,17 @@ def _freshness(d: Path) -> float:
 def find_appdata(game_dir: Path, home: Path | None = None) -> Path | None:
     """Locate the user folder the game actually reads mods from.
 
-    Only folders that exist (and hold game data) are returned: for the native Linux build there is no
-    verified default location, so installing into a guessed folder would silently not load.
-    The Proton prefix counts even if the game has not run yet (its Larian folder is created on install).
+    Native Linux build: ~/.local/share/Larian Studios/Baldur's Gate 3 (created on install if missing).
+    Windows build via Proton: the compatdata prefix, even if the game has not run yet.
     """
     home = home or Path.home()
     native = not (game_dir / "bin" / "bg3.exe").exists() and game_dir.is_dir()
     with_data = [d for d in _native_candidates(home) if _has_user_data(d)]
     with_data.sort(key=_freshness, reverse=True)  # the one the game wrote to most recently wins
+    if native:  # a leftover Proton prefix is irrelevant to the native build
+        return with_data[0] if with_data else NATIVE_DEFAULT(home)
     proton = _proton_candidates(game_dir, home)
-    order = (with_data + proton) if native else (proton + with_data)
+    order = proton + with_data
     return order[0] if order else None
 
 
