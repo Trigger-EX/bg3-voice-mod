@@ -15,6 +15,7 @@ from bg3vm.core.config import PROJECTS_DIR, Settings
 from bg3vm.core.logs import LOG_FILE
 from bg3vm.core.pipeline import STAGES
 from bg3vm.core.project import Project
+from bg3vm.core.voices import list_voices
 from bg3vm.engines import ENGINES
 from bg3vm.audio.vgmstream import find_vgmstream, install_vgmstream
 from bg3vm.game.steam import GameInstall, find_bg3, search_appdata
@@ -113,6 +114,8 @@ class MainWindow(QMainWindow):
             self.nav.addItem(title)
             self.stack.addWidget(builder())
         self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
+        self.engine_box.currentIndexChanged.connect(lambda _: self._refresh_voices())
+        self._refresh_voices()
         self.nav.setCurrentRow(0)
         h.addWidget(self.nav)
         h.addWidget(self.stack, 1)
@@ -342,7 +345,12 @@ class MainWindow(QMainWindow):
         w, lay = page_shell()
         lay.addWidget(heading("Your voice", "Add clean recordings of yourself speaking. 10+ minutes works best."))
         self.files: list[str] = []
-        lay.addWidget(DropLabel(self._add_paths))
+        self.voice_box = QComboBox()
+        self.voice_box.currentIndexChanged.connect(self._voice_choice_changed)
+        lay.addWidget(QLabel("Voice model"))
+        lay.addWidget(self.voice_box)
+        self.drop = DropLabel(self._add_paths)
+        lay.addWidget(self.drop)
         self.file_list = QListWidget()
         lay.addWidget(self.file_list, 1)
         return w
@@ -388,6 +396,26 @@ class MainWindow(QMainWindow):
         self.log.setReadOnly(True)
         lay.addWidget(self.log, 1)
         return w
+
+    # ---- saved voices
+    def _refresh_voices(self):
+        keep = self.voice_box.currentData()
+        self.voice_box.blockSignals(True)
+        self.voice_box.clear()
+        self.voice_box.addItem("Train a new voice from my recordings", "")
+        for v in list_voices(self.engine_box.currentData()):
+            self.voice_box.addItem(f"Reuse saved voice: {v.label}", str(v.path))
+        i = self.voice_box.findData(keep)
+        self.voice_box.setCurrentIndex(max(i, 0))
+        self.voice_box.blockSignals(False)
+        self._voice_choice_changed()
+
+    def _voice_choice_changed(self, _=None):
+        train_new = not self.voice_box.currentData()
+        self.drop.setEnabled(train_new)
+        self.file_list.setEnabled(train_new)
+        self.drop.setText("Drop your voice recordings (files or folders) here\nor click to browse" if train_new
+                          else "Using a saved voice: no recordings or training needed.")
 
     # ---- helpers
     def _autodetect(self):
@@ -452,7 +480,8 @@ class MainWindow(QMainWindow):
 
     def _start(self):
         speaker = self.speaker_box.currentData() or self.speaker_box.currentText().split(" — ")[0].strip()
-        if not speaker or not self.files:
+        voice_model = self.voice_box.currentData() or ""
+        if not speaker or (not self.files and not voice_model):
             self.log.appendPlainText("Pick a character and add at least one recording first.")
             return
         if not self.ensure_vgmstream():
@@ -469,6 +498,7 @@ class MainWindow(QMainWindow):
         self.project = p
         p.speaker = speaker
         p.voice_inputs = list(self.files)
+        p.voice_model = voice_model
         p.engine = self.engine_box.currentData()
         p.preset = self.preset_box.currentData()
         p.auto_pitch = self.auto_pitch.isChecked()
@@ -513,6 +543,7 @@ class MainWindow(QMainWindow):
         self._finish("Failed. See log; fix the issue and run again to resume.")
 
     def _on_done(self):
+        self._refresh_voices()
         out = self.project.dir("out")
         installed = (self.project.dir("state") / "install.done").exists()
         self._finish("Done! Launch the game and your voice is in." if installed

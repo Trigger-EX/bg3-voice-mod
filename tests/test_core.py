@@ -22,6 +22,9 @@ import threading
 def _isolated_dirs(tmp_path, monkeypatch):
     monkeypatch.setattr(audiocache, "CACHE_DIR", tmp_path / "cache")
     monkeypatch.setattr(pipeline, "PROJECTS_DIR", tmp_path / "legacy_projects")
+    from bg3vm.core import voices
+    monkeypatch.setattr(voices, "VOICES_DIR", tmp_path / "voices")
+    monkeypatch.setattr(voices, "PROJECTS_DIR", tmp_path / "proj_none")
 
 
 def test_pak_roundtrip(tmp_path):
@@ -330,3 +333,41 @@ def test_wait_raises_when_install_fails_or_is_cancelled():
     stop.set()
     with pytest.raises(Cancelled):
         b2.wait(stop, poll=0.05)
+
+
+@pytest.mark.skipif(not __import__("shutil").which("ffmpeg"), reason="needs ffmpeg")
+def test_trained_voice_is_saved_and_reused_for_another_character(tmp_path):
+    from bg3vm.core import voices
+    A, B = "c7c13742bacd460a8f65f864fe41f255", "ad9af97d75da406aae137071c563f604"
+    voice = tmp_path / "game/Data/Localization/English"
+    voice.mkdir(parents=True)
+    w = pcm_to_wem(np.random.uniform(-.3, .3, 24000).astype("float32"), 24000)
+    write_pak(voice / "Voice.pak", {f"Mods/G/v{s}_h{i}g1.wem": w for s in (A, B) for i in range(2)})
+    t = np.arange(40000 * 12) / 40000
+    sf.write(str(tmp_path / "me.wav"), (0.4 * np.sin(2 * np.pi * 180 * t) * (np.sin(2 * np.pi * 0.2 * t) > -0.3)).astype("float32"), 40000)
+
+    class S: game_dir = str(tmp_path / "game"); bg3_appdata = str(tmp_path / "ad")
+    one = Project.create("tav_one", base=tmp_path / "proj", engine="fake", speaker="Astarion",
+                         voice_inputs=[str(tmp_path / "me.wav")])
+    run_stages(pipeline.STAGES, Context(one, lambda f, m: None, threading.Event(), S()))
+    saved = voices.list_voices("fake")
+    assert [v.name for v in saved] == ["tav_one"] and saved[0].origin == "library"
+    assert voices.read_info(saved[0].path).get("f0")
+
+    # a different character, same voice: no recordings, nothing retrained
+    two = Project.create("tav_two", base=tmp_path / "proj", engine="fake", speaker="Gale",
+                         voice_model=str(saved[0].path))
+    run_stages(pipeline.STAGES, Context(two, lambda f, m: None, threading.Event(), S()))
+    assert not list((two.root / "dataset").glob("*.wav")) if (two.root / "dataset").exists() else True
+    assert (two.root / "model/model.json").exists()
+    assert list((tmp_path / "ad/Mods").glob("tav_two.pak"))
+    assert {v.name for v in voices.list_voices("fake")} == {"tav_one"}  # reusing doesn't add duplicates
+
+
+def test_project_models_trained_earlier_are_listed(tmp_path):
+    from bg3vm.core import voices
+    m = tmp_path / "projects/old/model"
+    m.mkdir(parents=True)
+    (m / "model.pth").write_bytes(b"x"); (m / "model.index").write_bytes(b"y")
+    got = voices.list_voices("rvc", library=tmp_path / "nolib", projects=tmp_path / "projects")
+    assert [(v.name, v.origin) for v in got] == [("old", "project")]

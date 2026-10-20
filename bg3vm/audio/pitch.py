@@ -43,9 +43,12 @@ def median_f0(paths: list[Path], max_seconds: float = 120.0) -> float | None:
     return float(np.median(vals)) if len(vals) >= 20 else None
 
 
+def transpose_for(source_f0: float | None, target_f0: float | None, limit: int = 12) -> int:
+    if not source_f0 or not target_f0:
+        return 0
+    return max(-limit, min(limit, round(12 * math.log2(target_f0 / source_f0))))
+
+
 def auto_transpose(source_paths: list[Path], target_paths: list[Path], limit: int = 12) -> int:
     """Semitones to shift the *source* (game) voice so its pitch matches the target (your) voice."""
-    src, tgt = median_f0(source_paths), median_f0(target_paths)
-    if not src or not tgt:
-        return 0
-    return max(-limit, min(limit, round(12 * math.log2(tgt / src))))
+    return transpose_for(median_f0(source_paths), median_f0(target_paths), limit)

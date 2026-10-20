@@ -12,7 +12,7 @@ import soundfile as sf
 
 from bg3vm.audio import dataset as ds
 from bg3vm.audio.wem import wav_to_wem
-from bg3vm.core import audiocache
+from bg3vm.core import audiocache, voices
 from bg3vm.core.config import PROJECTS_DIR
 from bg3vm.core.jobs import Context, Skip, Stage
 from bg3vm.core.logs import LOG_FILE
@@ -115,6 +115,9 @@ def stage_extract(ctx: Context) -> None:
 
 def stage_dataset(ctx: Context) -> None:
     p = ctx.project
+    if p.voice_model:
+        ctx.emit(1.0, "Using a saved voice model: no recordings needed.")
+        return
     qc = ds.prepare_dataset([Path(x) for x in p.voice_inputs], p.dir("dataset"), p.dir("tmp"))
     ctx.emit(1.0, f"{qc.clips} clips, {qc.minutes:.1f} min" + ("".join(f"\n⚠ {w}" for w in qc.warnings)))
 
@@ -136,7 +139,15 @@ def _engine(ctx: Context):
 
 def stage_train(ctx: Context) -> None:
     p = ctx.project
+    if p.voice_model:
+        voices.use_voice(Path(p.voice_model), p.dir("model"))
+        ctx.emit(1.0, f"Reusing saved voice: {Path(p.voice_model).name}")
+        return
     _engine(ctx).train(p.dir("dataset"), p.dir("model"), p.preset, ctx.emit, ctx.cancel)
+    from bg3vm.audio.pitch import median_f0
+    f0 = median_f0(sorted(p.dir("dataset").glob("*.wav"))[:60])
+    saved = voices.save_voice(p.name, p.dir("model"), f0)
+    ctx.emit(1.0, f"Voice saved to your library as '{p.name}' so you can reuse it: {saved}")
 
 
 def stage_convert(ctx: Context) -> None:
@@ -145,8 +156,10 @@ def stage_convert(ctx: Context) -> None:
     lines = json.loads((p.dir("index") / "lines.json").read_text())
     transpose = p.transpose
     if p.auto_pitch:
-        from bg3vm.audio.pitch import auto_transpose
-        transpose = auto_transpose([Path(l["wav"]) for l in lines[:60]], sorted(p.dir("dataset").glob("*.wav"))[:60])
+        from bg3vm.audio.pitch import median_f0, transpose_for
+        info = voices.read_info(p.dir("model"))
+        target = info.get("f0") or median_f0(sorted(p.dir("dataset").glob("*.wav"))[:60])
+        transpose = transpose_for(median_f0([Path(l["wav"]) for l in lines[:60]]), target)
         ctx.emit(0.0, f"Automatic pitch shift: {transpose:+d} semitones")
     pairs = [(Path(ln["wav"]), p.dir("conv_wav") / f"{ln['key']}.wav") for ln in lines]
     todo = [(s, d) for s, d in pairs if not d.exists()]
@@ -203,9 +216,10 @@ STAGES = [
           key=lambda p: [p.speaker.lower(), p.max_lines], outputs=("index",)),
     Stage("extract", "Extract original audio", stage_extract, deps=("index",)),
     Stage("dataset", "Prepare your recordings", stage_dataset,
-          key=_inputs_fp, outputs=("dataset", "tmp", "qc.json")),
+          key=lambda p: ["saved", p.voice_model] if p.voice_model else _inputs_fp(p),
+          outputs=("dataset", "tmp", "qc.json")),
     Stage("train", "Train voice model", stage_train,
-          key=lambda p: [p.engine, p.preset], deps=("dataset",), outputs=("model",)),
+          key=lambda p: [p.engine, p.preset, p.voice_model], deps=("dataset",), outputs=("model",)),
     Stage("convert", "Convert lines", stage_convert, key=lambda p: [p.transpose, p.auto_pitch],
           deps=("train", "extract"), outputs=("conv_wav",)),
     Stage("encode", "Encode .wem", stage_encode, deps=("convert",), outputs=("new_wem",)),

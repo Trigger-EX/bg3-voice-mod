@@ -18,6 +18,7 @@ class Project:
     engine: str = "rvc"
     preset: str = "good"
     transpose: int = 0
+    voice_model: str = ""  # path of a saved voice to reuse; empty = train from recordings
     auto_pitch: bool = True  # estimate the semitone shift from your voice vs. the original line
     max_lines: int = 0  # 0 = all
     mod_uuid: str = field(default_factory=lambda: str(uuid.uuid4()))
