@@ -8,7 +8,7 @@ from bg3vm.audio.wem import pcm_to_wem
 from bg3vm.audio.dataset import split_on_silence, qc_report
 from bg3vm.core.jobs import Context, run_stages
 from bg3vm.core.project import Project
-from bg3vm.core import pipeline
+from bg3vm.core import audiocache, pipeline
 from bg3vm.game.loca import build_loca, parse_loca
 from bg3vm.game.lspk import PakReader, write_pak
 from bg3vm.game.steam import find_bg3, parse_vdf
@@ -20,7 +20,7 @@ import threading
 
 @pytest.fixture(autouse=True)
 def _isolated_dirs(tmp_path, monkeypatch):
-    monkeypatch.setattr(pipeline, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(audiocache, "CACHE_DIR", tmp_path / "cache")
     monkeypatch.setattr(pipeline, "PROJECTS_DIR", tmp_path / "legacy_projects")
 
 
@@ -172,8 +172,8 @@ def test_extraction_shared_between_projects(tmp_path, monkeypatch):
 
     class S: game_dir = str(tmp_path / "game"); bg3_appdata = ""
     decoded = []
-    real = pipeline.decode_wem
-    monkeypatch.setattr(pipeline, "decode_wem", lambda a, b: (decoded.append(a), real(a, b)))
+    real = audiocache.decode_wem
+    monkeypatch.setattr(audiocache, "decode_wem", lambda a, b: (decoded.append(a), real(a, b)))
 
     def extract_only(name):
         p = Project.create(name, base=tmp_path / "proj", engine="fake", speaker="Astarion")
@@ -196,3 +196,11 @@ def test_legacy_project_audio_is_imported(tmp_path):
     dst = tmp_path / "c.wav"
     pipeline._link_or_copy(got["vX_h1"], dst)
     assert dst.read_bytes() == b"RIFFfake"
+
+
+def test_sample_lines_prefers_mid_length():
+    from bg3vm.game.voicemeta import VoiceLine, sample_lines
+    lines = [VoiceLine(f"k{i}", "p", "e", "s", "h", size=i * 100) for i in range(1, 101)]
+    picks = sample_lines(lines)
+    assert len(picks) == 8 and all(3500 <= l.size <= 8500 for l in picks)
+    assert len(sample_lines(lines[:3])) == 3

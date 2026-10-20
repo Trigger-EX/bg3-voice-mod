@@ -11,9 +11,9 @@ from pathlib import Path
 import soundfile as sf
 
 from bg3vm.audio import dataset as ds
-from bg3vm.audio.vgmstream import decode_wem
 from bg3vm.audio.wem import wav_to_wem
-from bg3vm.core.config import CACHE_DIR, PROJECTS_DIR
+from bg3vm.core import audiocache
+from bg3vm.core.config import PROJECTS_DIR
 from bg3vm.core.jobs import Context, Skip, Stage
 from bg3vm.core.logs import LOG_FILE
 from bg3vm.engines import get_engine
@@ -52,10 +52,7 @@ def stage_index(ctx: Context) -> None:
     ctx.emit(1.0, f"{len(lines)} lines for {p.speaker}")
 
 
-def _cache_dir(pak: str) -> Path:
-    """Decoded audio is cached per pak build (name, size, mtime), so a game update never serves stale audio."""
-    st = os.stat(pak)
-    return CACHE_DIR / "orig_wav" / f"{Path(pak).stem}-{st.st_size}-{int(st.st_mtime)}"
+_cache_dir = audiocache.cache_dir
 
 
 def _link_or_copy(src: Path, dst: Path) -> None:
@@ -96,13 +93,7 @@ def stage_extract(ctx: Context) -> None:
                     reused += 1
                 else:
                     r = readers.setdefault(ln["pak"], PakReader(ln["pak"]))
-                    with tempfile.TemporaryDirectory(dir=p.dir("tmp")) as td:
-                        wem = Path(td) / f"{ln['key']}.wem"
-                        part = Path(td) / f"{ln['key']}.wav"
-                        wem.write_bytes(r.read(ln["entry"]))
-                        decode_wem(wem, part)
-                        shutil.move(str(part), str(wav) + ".tmp")  # never leave a half-written cache file
-                        os.replace(str(wav) + ".tmp", wav)
+                    audiocache.decode_to_cache(ln["pak"], ln["entry"], ln["key"], r, p.dir("tmp"))
             except Exception as e:
                 log.warning("extract failed for %s: %s", ln["key"], e, exc_info=True)
                 failed.append({"key": ln["key"], "error": str(e)})

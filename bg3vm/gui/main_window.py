@@ -18,7 +18,10 @@ from bg3vm.core.project import Project
 from bg3vm.engines import ENGINES
 from bg3vm.audio.vgmstream import find_vgmstream, install_vgmstream
 from bg3vm.game.steam import GameInstall, find_bg3
-from bg3vm.game.voicemeta import index_voice_paks, list_speakers
+from bg3vm.audio.pitch import median_f0
+from bg3vm.core.audiocache import decode_to_cache
+from bg3vm.game.voicemeta import index_voice_paks, lines_for_speaker, list_speakers, sample_lines
+from bg3vm.gui.player import Player
 from bg3vm.gui.runner import JobRunner
 from bg3vm.gui.workers import FuncThread
 
@@ -85,6 +88,9 @@ class MainWindow(QMainWindow):
         self.settings = Settings.load()
         self.project = Project(name="", root=PROJECTS_DIR / "_none")
         self._stage_text = ""
+        self._voice_lines: list = []
+        self._sample_idx: dict[str, int] = {}
+        self.player = Player()
         self.runner = JobRunner()
         self.runner.progress.connect(self._on_progress)
         self.runner.stage.connect(self._on_stage)
@@ -143,7 +149,7 @@ class MainWindow(QMainWindow):
                             "You can install it manually and make sure `vgmstream-cli` is on PATH.")
         return False
 
-    def _scan(self):
+    def _scan(self, _checked=False, then=None):
         g = self._current_game()
         if not g:
             QMessageBox.information(self, "Scan", "Choose the Baldur's Gate 3 folder first.")
@@ -155,21 +161,86 @@ class MainWindow(QMainWindow):
             paks = g.voice_paks()
             if not paks:
                 raise RuntimeError("No Voice*.pak found under Data/Localization.")
-            return list_speakers(index_voice_paks(paks))
+            self._voice_lines = index_voice_paks(paks)
+            return list_speakers(self._voice_lines)
 
         self._scan_thread = t = FuncThread(work)
-        t.result.connect(self._scan_done)
+        t.result.connect(lambda sp: (self._scan_done(sp), then() if then else None))
         t.failed.connect(lambda m: (QMessageBox.warning(self, "Scan failed", m), self._scan_reset()))
         t.start()
+
+    def _selected_speaker(self) -> str:
+        return (self.speaker_box.currentData()
+                or self.speaker_box.currentText().split(" — ")[0].strip())
+
+    def _sample(self, _checked=False, scanned=False):
+        """Extract (cached) and play a mid-length line from the selected character."""
+        if self.player.playing:
+            self.player.stop()
+            self.play_btn.setText("▶ Sample")
+            return
+        speaker = self._selected_speaker()
+        if not speaker:
+            self.sample_lbl.setText("Pick or type a character first.")
+            return
+        if not self._voice_lines:
+            if scanned:
+                return
+            self.sample_lbl.setText("Scanning the game first…")
+            self._scan(then=lambda: self._sample(scanned=True))
+            return
+        lines = lines_for_speaker(self._voice_lines, speaker)
+        if not lines:
+            self.sample_lbl.setText(f"No lines found for {speaker!r}.")
+            return
+        picks = sample_lines(lines)
+        i = self._sample_idx.get(speaker, -1) + 1
+        self._sample_idx[speaker] = i
+        ln = picks[i % len(picks)]
+        self.play_btn.setEnabled(False)
+        self.sample_lbl.setText("Extracting sample…")
+
+        def work(_progress):
+            wav = decode_to_cache(ln.pak, ln.entry, ln.key)
+            return wav, median_f0([wav])
+
+        self._sample_thread = t = FuncThread(work)
+        t.result.connect(self._sample_ready)
+        t.failed.connect(lambda m: (self.sample_lbl.setText(f"Sample failed: {m}"), self.play_btn.setEnabled(True)))
+        t.start()
+
+    def _sample_ready(self, result):
+        wav, f0 = result
+        self.play_btn.setEnabled(True)
+        hint = ("" if not f0 else
+                f"pitch ≈ {f0:.0f} Hz — sounds {'higher (typically a female voice)' if f0 > 185 else 'lower (typically a male voice)'}")
+        self.sample_lbl.setText(f"Playing a sample ({hint}). Press ■ to stop; press ▶ again for another line."
+                                if hint else "Playing a sample.")
+        try:
+            self.player.play(wav)
+            self.play_btn.setText("■ Stop")
+            QTimer.singleShot(300, self._poll_player)
+        except RuntimeError as e:
+            self.sample_lbl.setText(str(e))
+
+    def _poll_player(self):
+        if self.player.playing:
+            QTimer.singleShot(300, self._poll_player)
+        else:
+            self.play_btn.setText("▶ Sample")
 
     def _scan_reset(self):
         self.scan_btn.setEnabled(True)
         self.scan_btn.setText("Scan game for characters")
 
     def _scan_done(self, speakers):
+        prev = self._selected_speaker().lower()
         self.speaker_box.clear()
         for sp in speakers:
             self.speaker_box.addItem(f"{sp.name} — {sp.lines} lines", sp.id)
+        for i, sp in enumerate(speakers):  # keep whatever the user had picked or typed
+            if prev and prev in (sp.id, sp.name.lower()):
+                self.speaker_box.setCurrentIndex(i)
         self._scan_reset()
 
     def _current_game(self) -> GameInstall | None:
@@ -209,11 +280,19 @@ class MainWindow(QMainWindow):
         self.speaker_box.lineEdit().setPlaceholderText("Scan the game, or type a name (e.g. Astarion)")
         self.scan_btn = QPushButton("Scan game for characters")
         self.scan_btn.clicked.connect(self._scan)
+        self.play_btn = QPushButton("▶ Sample")
+        self.play_btn.setToolTip("Extract and play a line from the selected character (click again for another line)")
+        self.play_btn.clicked.connect(self._sample)
         r2 = QHBoxLayout()
         r2.addWidget(self.speaker_box, 1)
+        r2.addWidget(self.play_btn)
         r2.addWidget(self.scan_btn)
         cl.addWidget(QLabel("Character to replace"))
         cl.addLayout(r2)
+        self.sample_lbl = QLabel("")
+        self.sample_lbl.setObjectName("muted")
+        self.sample_lbl.setWordWrap(True)
+        cl.addWidget(self.sample_lbl)
         self.engine_box = QComboBox()
         for k, cls in ENGINES.items():
             self.engine_box.addItem(cls.label, k)
