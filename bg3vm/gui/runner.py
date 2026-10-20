@@ -17,12 +17,13 @@ class _Worker(QThread):
     finished_ok = Signal()
     cancelled = Signal()
 
-    def __init__(self, project, settings, force, cancel):
+    def __init__(self, project, settings, force, cancel, installer=None):
         super().__init__()
         self.project, self.settings, self.force, self._cancel = project, settings, force, cancel
+        self.installer = installer
 
     def run(self):
-        ctx = Context(self.project, lambda f, m: self.progress.emit(f, m), self._cancel, self.settings)
+        ctx = Context(self.project, lambda f, m: self.progress.emit(f, m), self._cancel, self.settings, self.installer)
         try:
             run_stages(STAGES, ctx, self.force, lambda i, n, label: self.stage.emit(i, n, label))
             self.finished_ok.emit()
@@ -49,11 +50,11 @@ class JobRunner(QObject):
     def running(self) -> bool:
         return bool(self._worker and self._worker.isRunning())
 
-    def start(self, project, settings, force=None):
+    def start(self, project, settings, force=None, installer=None):
         if self.running:
             return
         self._cancel.clear()
-        w = _Worker(project, settings, force or set(), self._cancel)
+        w = _Worker(project, settings, force or set(), self._cancel, installer)
         w.progress.connect(self.progress)
         w.stage.connect(self.stage)
         w.failed.connect(self.failed)

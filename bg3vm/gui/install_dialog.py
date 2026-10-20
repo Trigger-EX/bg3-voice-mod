@@ -1,78 +1,75 @@
-"""Pop-out progress window for large engine downloads."""
+"""Pop-out window showing the background engine download. Non-modal: the pipeline keeps running behind it."""
 from __future__ import annotations
 
-import threading
-
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QDialog, QLabel, QPlainTextEdit, QProgressBar, QPushButton, QVBoxLayout
-
-from bg3vm.gui.workers import FuncThread
+from PySide6.QtCore import QTimer, Signal
+from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPlainTextEdit, QProgressBar, QPushButton, QVBoxLayout
 
 
-class InstallDialog(QDialog):
-    def __init__(self, parent, engine):
+class InstallWindow(QDialog):
+    _progress = Signal(float, str)  # bridges the worker thread's callbacks onto the UI thread
+
+    def __init__(self, parent, installer):
         super().__init__(parent)
-        self.engine = engine
-        self.setWindowTitle("Installing voice engine")
-        self.setModal(True)
+        self.installer = installer
+        self.setWindowTitle("Downloading voice engine")
+        self.setModal(False)
         self.resize(640, 420)
+        eng = installer.engine
         lay = QVBoxLayout(self)
-        self.title = QLabel(f"<b>{engine.label}</b><br>One-time download ({engine.install_size_hint}). "
-                            "Keep this window open; it can take a while on a slow connection.")
-        self.title.setWordWrap(True)
+        title = QLabel(f"<b>{eng.label}</b><br>One-time download ({eng.install_size_hint}). The steps that don't "
+                       "need it keep running; training waits here if the download isn't finished yet.")
+        title.setWordWrap(True)
         self.stage = QLabel("Starting…")
         self.bar = QProgressBar()
         self.bar.setRange(0, 1000)
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(400)
-        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn = QPushButton("Cancel download")
         self.cancel_btn.clicked.connect(self._cancel)
-        for w in (self.title, self.stage, self.bar, self.log, self.cancel_btn):
+        self.hide_btn = QPushButton("Hide window")
+        self.hide_btn.clicked.connect(self.hide)
+        row = QHBoxLayout()
+        row.addWidget(self.cancel_btn)
+        row.addStretch(1)
+        row.addWidget(self.hide_btn)
+        for w in (title, self.stage, self.bar, self.log):
             lay.addWidget(w)
-        self._cancel_ev = threading.Event()
-        self._error: str | None = None
-        self._ok = False
+        lay.addLayout(row)
         self._last_stage = ""
-        self._thread = FuncThread(lambda progress: engine.install(progress, self._cancel_ev))
-        self._thread.progress.connect(self._on_progress)
-        self._thread.result.connect(self._on_done)
-        self._thread.failed.connect(self._on_failed)
-
-    def run(self) -> bool:
-        """Show the window, start the download right away, and block until it finishes. True on success."""
-        self._thread.start()
-        self.exec()
-        self._thread.wait()
-        if self._error:
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.warning(self.parent(), "Install failed", self._error)
-        return self._ok
+        self._progress.connect(self._on_progress)
+        installer.add_listener(lambda f, m: self._progress.emit(f, m))
+        self._poll = QTimer(self)
+        self._poll.timeout.connect(self._check_done)
+        self._poll.start(300)
 
     def _on_progress(self, frac: float, msg: str):
         self.bar.setValue(int(frac * 1000))
-        if msg and msg != self._last_stage and not msg.startswith((" ", "\t")) and len(msg) < 90 and msg[0].isupper():
+        if msg and msg != self._last_stage and len(msg) < 90 and msg[0].isupper() and not msg.startswith("Using"):
             self.stage.setText(msg)
             self._last_stage = msg
         self.log.appendPlainText(msg)
 
-    def _on_done(self, _):
-        self._ok = True
-        self.accept()
-
-    def _on_failed(self, msg: str):
-        if "Cancelled" not in msg:
-            self._error = msg
-        self.reject()
+    def _check_done(self):
+        if not self.installer.done.is_set():
+            return
+        self._poll.stop()
+        self.cancel_btn.setEnabled(False)
+        if self.installer.ok:
+            self.stage.setText("Voice engine installed.")
+            QTimer.singleShot(1500, self.close)
+        else:
+            self.stage.setText(f"Failed: {self.installer.error}")
+            self.show()  # make sure a failure is seen
 
     def _cancel(self):
-        self._cancel_ev.set()
+        self.installer.cancel.set()
         self.cancel_btn.setEnabled(False)
         self.stage.setText("Cancelling…")
 
-    def closeEvent(self, e):  # closing the window counts as cancel; wait for the worker to stop
-        if self._thread.isRunning():
-            self._cancel()
+    def closeEvent(self, e):
+        if self.installer.running:  # closing the window must not silently kill a multi-GB download
             e.ignore()
+            self.hide()
         else:
             super().closeEvent(e)

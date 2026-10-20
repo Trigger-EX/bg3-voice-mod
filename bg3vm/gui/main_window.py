@@ -21,7 +21,8 @@ from bg3vm.game.steam import GameInstall, find_bg3, search_appdata
 from bg3vm.audio.pitch import median_f0
 from bg3vm.core.audiocache import decode_to_cache
 from bg3vm.game.voicemeta import index_voice_paks, lines_for_speaker, list_speakers, sample_lines
-from bg3vm.gui.install_dialog import InstallDialog
+from bg3vm.core.background import BackgroundInstall
+from bg3vm.gui.install_dialog import InstallWindow
 from bg3vm.gui.player import Player
 from bg3vm.gui.runner import JobRunner
 from bg3vm.gui.workers import FuncThread
@@ -89,6 +90,8 @@ class MainWindow(QMainWindow):
         self.settings = Settings.load()
         self.project = Project(name="", root=PROJECTS_DIR / "_none")
         self._stage_text = ""
+        self.installer: BackgroundInstall | None = None
+        self.install_window: InstallWindow | None = None
         self._voice_lines: list = []
         self._sample_idx: dict[str, int] = {}
         self.player = Player()
@@ -367,6 +370,11 @@ class MainWindow(QMainWindow):
         row.addWidget(self.go)
         row.addWidget(self.cancel_btn)
         row.addStretch(1)
+        self.dl_btn = QPushButton("Show download")
+        self.dl_btn.setVisible(False)
+        self.dl_btn.clicked.connect(lambda: self.install_window and (self.install_window.show(),
+                                                                      self.install_window.raise_()))
+        row.addWidget(self.dl_btn)
         for label, target in [("Open mod folder", lambda: self._open(self.project.dir("out") if self.project.root.exists() else PROJECTS_DIR)),
                               ("Open logs", lambda: self._open(LOG_FILE.parent))]:
             b = QPushButton(label)
@@ -468,19 +476,25 @@ class MainWindow(QMainWindow):
         p.max_lines = self.maxlines.value()
         p.save()
         eng = ENGINES[p.engine]()
-        if not eng.available()[0] and eng.install_size_hint:
+        installer = self.installer if (self.installer and self.installer.running
+                                       and self.installer.engine.name == p.engine) else None
+        if installer is None and not eng.available()[0] and eng.install_size_hint:
             ok = QMessageBox.question(
                 self, "Download voice engine",
                 f"{eng.label} needs a one-time download ({eng.install_size_hint}).\n\n"
-                "It installs into the app's own folder. Download it now?")
+                "It starts now, in the background. The steps that don't need it (finding and extracting "
+                "voice lines, preparing your recordings) run meanwhile; training waits if needed. Continue?")
             if ok != QMessageBox.Yes:
                 return
-            if not InstallDialog(self, eng).run():  # download starts immediately, with a progress window
-                self.log.appendPlainText("Voice engine install was cancelled or failed.")
-                return
+            installer = self.installer = BackgroundInstall(eng)
+            self.install_window = InstallWindow(self, installer)
+            self.install_window.show()
+            installer.start()
+        if installer is not None:
+            self.dl_btn.setVisible(True)
         self.go.setEnabled(False)
         self.cancel_btn.setEnabled(True)
-        self.runner.start(p, s, {st.name for st in STAGES} if self.fresh.isChecked() else None)
+        self.runner.start(p, s, {st.name for st in STAGES} if self.fresh.isChecked() else None, installer)
 
     def _on_progress(self, frac, msg):
         self.bar.setValue(int(frac * 1000))

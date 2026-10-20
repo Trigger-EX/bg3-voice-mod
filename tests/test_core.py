@@ -249,3 +249,84 @@ def test_parallel_decode_isolates_bad_files(tmp_path, monkeypatch):
     assert [k for k, _ in bad] == ["k5"]
     assert seen[-1] == 60
     assert all(audiocache.cached_path(str(tmp_path / "V.pak"), f"k{i}").exists() for i in range(60) if i != 5)
+
+
+@pytest.mark.skipif(not __import__("shutil").which("ffmpeg"), reason="needs ffmpeg")
+def test_engine_downloads_in_background_and_training_waits(tmp_path):
+    import time
+    from bg3vm.core.background import BackgroundInstall
+    from bg3vm.engines import ENGINES
+    from bg3vm.engines.fake import FakeEngine
+
+    events = []
+
+    class SlowInstallEngine(FakeEngine):
+        name, install_size_hint = "slow", "1 GB"
+        ready = False
+
+        def available(self):
+            return (SlowInstallEngine.ready, "not installed")
+
+        def install(self, progress, cancel=None):
+            events.append(("install_start", time.monotonic()))
+            for i in range(10):
+                progress(i / 10, f"step {i}")
+                time.sleep(0.15)
+            SlowInstallEngine.ready = True
+            events.append(("install_done", time.monotonic()))
+
+        def train(self, *a, **k):
+            events.append(("train", time.monotonic()))
+            return super().train(*a, **k)
+
+    ENGINES["slow"] = SlowInstallEngine
+    try:
+        SPK = "c7c13742bacd460a8f65f864fe41f255"
+        voice = tmp_path / "game/Data/Localization/English"
+        voice.mkdir(parents=True)
+        w = pcm_to_wem(np.random.uniform(-.3, .3, 24000).astype("float32"), 24000)
+        write_pak(voice / "Voice.pak", {f"Mods/G/v{SPK}_h{i}g1.wem": w for i in range(2)})
+        t = np.arange(40000 * 12) / 40000
+        sf.write(str(tmp_path / "me.wav"), (0.4 * np.sin(2 * np.pi * 180 * t) * (np.sin(2 * np.pi * 0.2 * t) > -0.3)).astype("float32"), 40000)
+
+        class S: game_dir = str(tmp_path / "game"); bg3_appdata = str(tmp_path / "ad")
+        p = Project.create("t", base=tmp_path / "proj", engine="slow", speaker="Astarion", voice_inputs=[str(tmp_path / "me.wav")])
+        inst = BackgroundInstall(SlowInstallEngine())
+        inst.start()
+        stage_done = {}
+        orig_run = {s.name: s.run for s in pipeline.STAGES}
+        stages = [pipeline.Stage(s.name, s.label, (lambda ctx, n=s.name: (orig_run[n](ctx), stage_done.__setitem__(n, time.monotonic()))),
+                                 s.key, s.outputs, s.always, s.deps) for s in pipeline.STAGES]
+        run_stages(stages, Context(p, lambda f, m: None, threading.Event(), S(), inst))
+        times = dict(events)
+        assert stage_done["dataset"] < times["install_done"]   # recordings were prepared during the download
+        assert times["train"] >= times["install_done"]         # training waited for it
+        assert inst.ok
+    finally:
+        ENGINES.pop("slow", None)
+
+
+def test_wait_raises_when_install_fails_or_is_cancelled():
+    from bg3vm.core.background import BackgroundInstall
+    from bg3vm.core.jobs import Cancelled
+    from bg3vm.engines.fake import FakeEngine
+
+    class Broken(FakeEngine):
+        def install(self, progress, cancel=None):
+            raise RuntimeError("no network")
+
+    b = BackgroundInstall(Broken())
+    b.start()
+    with pytest.raises(RuntimeError, match="no network"):
+        b.wait(threading.Event(), poll=0.05)
+
+    class Hang(FakeEngine):
+        def install(self, progress, cancel=None):
+            threading.Event().wait(2)
+
+    b2 = BackgroundInstall(Hang())
+    b2.start()
+    stop = threading.Event()
+    stop.set()
+    with pytest.raises(Cancelled):
+        b2.wait(stop, poll=0.05)

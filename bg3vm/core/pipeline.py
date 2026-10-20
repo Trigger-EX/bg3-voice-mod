@@ -123,8 +123,11 @@ def _engine(ctx: Context):
     eng = get_engine(ctx.project.engine)
     ok, why = eng.available()
     if not ok:
-        ctx.emit(0.0, f"{why}. Installing {eng.label} ({eng.install_size_hint}); this happens once…")
-        eng.install(ctx.emit, ctx.cancel)
+        if ctx.installer is not None:  # downloading in the background since the run began: just wait for it
+            ctx.installer.wait(ctx.cancel, ctx.emit)
+        else:
+            ctx.emit(0.0, f"{why}. Installing {eng.label} ({eng.install_size_hint}); this happens once…")
+            eng.install(ctx.emit, ctx.cancel)
         ok, why = eng.available()
         if not ok:
             raise RuntimeError(f"Engine {eng.label} unavailable: {why}")

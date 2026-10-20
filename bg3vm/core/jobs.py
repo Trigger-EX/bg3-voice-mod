@@ -36,8 +36,9 @@ class Stage:
 
 
 class Context:
-    def __init__(self, project: Project, emit: Emit, cancel: threading.Event, settings=None):
+    def __init__(self, project: Project, emit: Emit, cancel: threading.Event, settings=None, installer=None):
         self.project, self.emit, self.cancel, self.settings = project, emit, cancel, settings
+        self.installer = installer  # BackgroundInstall for the voice engine, if one is downloading
 
     def check(self) -> None:
         if self.cancel.is_set():
