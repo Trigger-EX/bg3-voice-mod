@@ -173,9 +173,9 @@ def stage_install(ctx: Context) -> None:
     d = json.loads((ctx.project.dir("out") / "mod.json").read_text())
     mod = BuiltMod(Path(d["pak"]), Path(d["zip"]), d["name"], d["folder"], d["uuid"], d["version64"])
     if not g.appdata_dir:
-        ctx.emit(1.0, f"Couldn't find BG3's Proton folder, so the mod was not installed.\n"
+        ctx.emit(1.0, f"Couldn't find BG3's user data folder, so the mod was not installed.\n"
                       f"Your mod is ready: {mod.pak}\n"
-                      f"Copy it into <BG3 user folder>/Mods, or set that folder in Setup and run again.")
+                      f"Copy it into <BG3 user data folder>/Mods, or set that folder in Setup (Find…) and run again.")
         (ctx.project.dir("state") / "install.done").unlink(missing_ok=True)
         raise Skip()
     dest = install_mod(g.appdata_dir, mod)

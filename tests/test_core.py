@@ -204,3 +204,32 @@ def test_sample_lines_prefers_mid_length():
     picks = sample_lines(lines)
     assert len(picks) == 8 and all(3500 <= l.size <= 8500 for l in picks)
     assert len(sample_lines(lines[:3])) == 3
+
+
+def test_native_linux_user_data_detection(tmp_path):
+    from bg3vm.game.steam import GameInstall, search_appdata
+    lib = tmp_path / ".local/share/Steam"
+    game = lib / "steamapps/common/Baldurs Gate 3"
+    (game / "Data").mkdir(parents=True)  # no bin/bg3.exe -> native build
+    (lib / "steamapps/libraryfolders.vdf").write_text('"libraryfolders" { "0" { "path" "%s" } }' % lib)
+    assert GameInstall(game, None).native
+    assert GameInstall.from_game_dir(game, home=tmp_path).appdata_dir is None  # nothing to go on: don't guess
+    data = tmp_path / ".local/share/Larian Studios/Baldur's Gate 3"
+    (data / "PlayerProfiles/Public").mkdir(parents=True)
+    (data / "PlayerProfiles/Public/modsettings.lsx").write_text("<save/>")
+    assert GameInstall.from_game_dir(game, home=tmp_path).appdata_dir == data
+    assert search_appdata(tmp_path) == [data]
+    # a Windows build (bin/bg3.exe) prefers the Proton prefix when both exist
+    (game / "bin").mkdir()
+    (game / "bin/bg3.exe").write_text("")
+    (lib / "steamapps/compatdata/1086940/pfx").mkdir(parents=True)
+    assert "compatdata" in str(GameInstall.from_game_dir(game, home=tmp_path).appdata_dir)
+    assert not GameInstall(game, None).native
+
+
+def test_voice_paks_found_in_unusual_layout(tmp_path):
+    from bg3vm.game.steam import GameInstall
+    d = tmp_path / "Data/Odd/English/Sub"
+    d.mkdir(parents=True)
+    (d / "Voice.pak").write_bytes(b"x")
+    assert [p.name for p in GameInstall(tmp_path, None).voice_paks()] == ["Voice.pak"]

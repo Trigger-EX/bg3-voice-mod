@@ -6,7 +6,7 @@ from pathlib import Path
 from PySide6.QtCore import QEventLoop, Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QMainWindow,
     QMessageBox, QPlainTextEdit, QProgressBar, QProgressDialog, QPushButton, QSpinBox,
     QStackedWidget, QVBoxLayout, QWidget,
 )
@@ -17,7 +17,7 @@ from bg3vm.core.pipeline import STAGES
 from bg3vm.core.project import Project
 from bg3vm.engines import ENGINES
 from bg3vm.audio.vgmstream import find_vgmstream, install_vgmstream
-from bg3vm.game.steam import GameInstall, find_bg3
+from bg3vm.game.steam import GameInstall, find_bg3, search_appdata
 from bg3vm.audio.pitch import median_f0
 from bg3vm.core.audiocache import decode_to_cache
 from bg3vm.game.voicemeta import index_voice_paks, lines_for_speaker, list_speakers, sample_lines
@@ -267,10 +267,14 @@ class MainWindow(QMainWindow):
         self.appdata_edit.setPlaceholderText("BG3 user folder (auto-detected; contains Mods/ and PlayerProfiles/)")
         ab = QPushButton("Browse…")
         ab.clicked.connect(lambda: self._pick_dir(self.appdata_edit))
+        self.find_btn = QPushButton("Find…")
+        self.find_btn.setToolTip("Search your home folder for the game's user data (looks for modsettings.lsx)")
+        self.find_btn.clicked.connect(self._find_appdata)
         arow = QHBoxLayout()
         arow.addWidget(self.appdata_edit, 1)
+        arow.addWidget(self.find_btn)
         arow.addWidget(ab)
-        cl.addWidget(QLabel("Mod install folder (Proton prefix: …/Larian Studios/Baldur's Gate 3)"))
+        cl.addWidget(QLabel("Mod install folder (the game's user data: contains Mods/ and PlayerProfiles/)"))
         cl.addLayout(arow)
         self.detect_lbl = QLabel("")
         self.detect_lbl.setObjectName("muted")
@@ -383,10 +387,39 @@ class MainWindow(QMainWindow):
             self.game_edit.setText(str(g.game_dir))
         if g and g.appdata_dir and not self.appdata_edit.text():
             self.appdata_edit.setText(str(g.appdata_dir))
+        kind = "native Linux build" if g and g.native else "Windows build (Proton)"
         self.detect_lbl.setText(
-            "Game and Proton prefix detected." if g and g.appdata_dir
-            else "Game found, but no Proton prefix; choose the mod install folder below." if g
+            f"Game detected ({kind}); user data folder found." if g and g.appdata_dir
+            else f"Game detected ({kind}), but its user data folder wasn't found. Use Find… or Browse… below "
+                 "(run the game once first so it creates it)." if g
             else "Game not auto-detected; choose the folders.")
+
+    def _find_appdata(self):
+        self.find_btn.setEnabled(False)
+        self.find_btn.setText("Searching…")
+        self._find_thread = t = FuncThread(lambda _p: search_appdata())
+
+        def done(hits):
+            self.find_btn.setEnabled(True)
+            self.find_btn.setText("Find…")
+            if not hits:
+                QMessageBox.information(self, "Not found",
+                                        "No game user data found. Launch Baldur's Gate 3 once (so it creates it), "
+                                        "then try again, or use Browse….")
+                return
+            choice = str(hits[0])
+            if len(hits) > 1:
+                choice, ok = QInputDialog.getItem(self, "Choose user data folder",
+                                                  "Several were found (most recently used first):",
+                                                  [str(h) for h in hits], 0, False)
+                if not ok:
+                    return
+            self.appdata_edit.setText(choice)
+
+        t.result.connect(done)
+        t.failed.connect(lambda m: (self.find_btn.setEnabled(True), self.find_btn.setText("Find…"),
+                                    QMessageBox.warning(self, "Search failed", m)))
+        t.start()
 
     def _open(self, path: Path):
         path.mkdir(parents=True, exist_ok=True)
