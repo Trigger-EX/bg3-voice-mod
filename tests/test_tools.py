@@ -54,3 +54,41 @@ def test_batch_size_by_vram():
     assert batch_size_for({"kind": "cpu", "vram_mb": None}) == 4
     assert batch_size_for({"kind": "cuda", "vram_mb": 8000}) == 8
     assert batch_size_for({"kind": "cuda", "vram_mb": 24000}) == 12
+
+
+def test_setup_run_kills_silent_tool_and_cancels_promptly():
+    import sys, threading, time
+    from bg3vm.core.jobs import Cancelled
+    from bg3vm.engines import applio_setup as su
+
+    sleeper = [sys.executable, "-c", "import time; time.sleep(60)"]
+    t0 = time.monotonic()
+    try:
+        su._run(sleeper, lambda f, m: None, "sleeper", None, silence_timeout=2)
+        raise AssertionError("expected a timeout")
+    except RuntimeError as e:
+        assert "no output for 2s" in str(e)
+    assert time.monotonic() - t0 < 10
+
+    ev = threading.Event()
+    threading.Timer(0.5, ev.set).start()  # cancel while the tool is completely silent
+    t0 = time.monotonic()
+    try:
+        su._run(sleeper, lambda f, m: None, "sleeper", ev)
+        raise AssertionError("expected cancel")
+    except Cancelled:
+        pass
+    assert time.monotonic() - t0 < 10
+
+
+def test_run_streams_output_and_reports_failure():
+    import sys
+    from bg3vm.engines import applio_setup as su
+    seen = []
+    su._run([sys.executable, "-c", "print('hello'); print('world')"], lambda f, m: seen.append(m), "echo", None)
+    assert "hello" in seen
+    try:
+        su._run([sys.executable, "-c", "print('boom'); raise SystemExit(3)"], lambda f, m: None, "bad", None)
+        raise AssertionError("expected failure")
+    except RuntimeError as e:
+        assert "exit 3" in str(e) and "boom" in str(e)

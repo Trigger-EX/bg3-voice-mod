@@ -62,7 +62,7 @@ class AccentTTS:
             raise RuntimeError("Install the RVC engine first")
         uv = setup._ensure_uv(progress, cancel)
         py = str(setup.venv_python())
-        env = dict(os.environ, UV_HTTP_TIMEOUT="600", HF_HOME=str(HF_HOME))
+        env = dict(os.environ, UV_HTTP_TIMEOUT="600", HF_HOME=str(HF_HOME), PYTHONUNBUFFERED="1")
         setup._step(progress, 0.1, "Installing the American English speech packages…")
         setup._run([uv, "pip", "install", "--python", py, "kokoro", "espeakng-loader", "soundfile", SPACY_MODEL],
                    progress, "speech package install", cancel, env)
@@ -71,7 +71,8 @@ class AccentTTS:
             jobs = Path(td) / "warmup.json"
             jobs.write_text(json.dumps({"voice": VOICES["male"], "jobs": [
                 {"key": "warmup", "text": "Warm up.", "out": str(Path(td) / "w.wav")}]}))
-            setup._run([py, str(WORKER), str(jobs)], progress, "speech model download", cancel, env)
+            setup._run([py, str(WORKER), str(jobs)], progress, "speech model download", cancel, env,
+                       silence_timeout=600)
         MARKER.write_text("ok")
         progress(1.0, "American English speech installed")
 

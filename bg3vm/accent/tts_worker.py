@@ -4,35 +4,51 @@ Usage: python tts_worker.py jobs.json
 jobs.json: {"voice": "am_michael", "speed": 1.0, "jobs": [{"key": ..., "text": ..., "out": ".../x.wav"}]}
 Prints one status line per job: 'OK i/N key' or 'FAIL i/N key reason'. Existing outputs are skipped.
 """
-import ctypes.util
-import glob
 import json
 import os
 import sys
+import time
+
+# Plain HTTP downloads: the newer chunked/Xet transfer path can stall silently on some networks.
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
+os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "30")
+
+
+def step(msg: str) -> None:
+    print(f"STEP {time.strftime('%H:%M:%S')} {msg}", flush=True)
 
 
 def point_espeak_at_system_install() -> None:
-    """The espeak copy bundled with espeakng-loader can have baked-in paths; prefer the system one."""
-    lib = ctypes.util.find_library("espeak-ng")
-    libs = glob.glob("/usr/lib*/**/libespeak-ng.so*", recursive=True) + glob.glob("/usr/lib/libespeak-ng.so*")
-    data = next((d for d in glob.glob("/usr/lib*/**/espeak-ng-data", recursive=True) + ["/usr/share/espeak-ng-data"]
+    """The espeak copy bundled with espeakng-loader can have baked-in paths; prefer the system one.
+
+    Only a handful of fixed directories are checked (no recursive globbing: that can crawl symlink loops).
+    """
+    lib_dirs = ["/usr/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/usr/lib64", "/usr/lib", "/usr/local/lib"]
+    lib = next((os.path.join(d, n) for d in lib_dirs for n in ("libespeak-ng.so.1", "libespeak-ng.so")
+                if os.path.exists(os.path.join(d, n))), None)
+    data = next((d for d in [os.path.join(d, "espeak-ng-data") for d in lib_dirs] + ["/usr/share/espeak-ng-data"]
                  if os.path.isfile(os.path.join(d, "phontab"))), None)
-    if not (libs and data):
+    if not (lib and data):
+        step("system espeak-ng not found; using the bundled copy")
         return
     import espeakng_loader
-    path = next((p for p in libs if p.endswith(".so.1")), libs[0])
-    espeakng_loader.get_library_path = lambda: path
+    espeakng_loader.get_library_path = lambda: lib
     espeakng_loader.get_data_path = lambda: data
+    step(f"using system espeak-ng ({lib})")
 
 
 def main(jobs_file: str) -> int:
     spec = json.load(open(jobs_file, encoding="utf-8"))
     point_espeak_at_system_install()
+    step("importing speech libraries")
     import numpy as np
     import soundfile as sf
     from kokoro import KPipeline
 
+    step("loading the speech model (downloads ~330 MB the first time)")
     pipe = KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M")
+    step("speech model ready")
     jobs = spec["jobs"]
     for i, job in enumerate(jobs, 1):
         if os.path.exists(job["out"]):

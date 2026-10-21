@@ -588,8 +588,9 @@ class MainWindow(QMainWindow):
 
     def _on_progress(self, frac, msg):
         self.bar.setValue(int(frac * 1000))
-        if re.search(r"\d+/\d+$", msg):  # per-file counter: show in the label, don't spam the log
-            self.stage_lbl.setText(f"{self._stage_text}  ({msg.rsplit(' ', 1)[-1]})")
+        if re.search(r"(\d+/\d+|\d+%)$", msg):  # counters / percentages: status line only, don't spam the log
+            self.stage_lbl.setText(f"{self._stage_text}  ({msg.rsplit(' ', 1)[-1]})"
+                                   if not msg.startswith("Waiting") else f"{self._stage_text}  — {msg}")
         else:
             self.log.appendPlainText(msg)
 

@@ -69,10 +69,12 @@ class BackgroundInstall:
     def wait(self, cancel: threading.Event, emit: Callable[[float, str], None] | None = None,
              poll: float = 0.5) -> None:
         """Block the calling pipeline thread until the install finishes. Raises if it failed."""
+        ticks = 0
         while not self.done.wait(poll):
             if cancel.is_set():
                 raise Cancelled()
-            if emit:
-                emit(self.last[0], f"Waiting for the voice engine download… {int(self.last[0] * 100)}%")
+            ticks += 1
+            if emit and ticks % max(1, int(2 / poll)) == 1:  # a heartbeat every ~2 s, not every poll
+                emit(self.last[0], f"Waiting for the download… {int(self.last[0] * 100)}%")
         if self.error:
             raise RuntimeError(f"Voice engine install failed: {self.error}")

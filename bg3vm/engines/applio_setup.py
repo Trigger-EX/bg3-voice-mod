@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import logging
 import os
+import queue
 import shutil
 import subprocess
 import sys
@@ -61,24 +62,66 @@ def _step(progress, frac: float, msg: str) -> None:
     progress(frac, msg)
 
 
-def _run(cmd: list[str], progress, label: str, cancel: threading.Event | None, env=None, cwd=None) -> None:
+def _cpu_ticks(pid: int) -> str:
+    try:
+        f = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        return f"cpu={int(f[11]) + int(f[12])} ticks"
+    except (OSError, IndexError, ValueError):
+        return "cpu=?"
+
+
+def _run(cmd: list[str], progress, label: str, cancel: threading.Event | None, env=None, cwd=None,
+         silence_timeout: float | None = None) -> None:
+    """Run a tool, streaming its output to `progress`. Cancel works even while the tool prints nothing;
+    silence_timeout kills a tool that has printed nothing for that many seconds."""
     log.info("run: %s", " ".join(map(str, cmd)))
-    last_emit = 0.0
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
                             env=env, cwd=cwd, start_new_session=True)
+    lines: queue.Queue = queue.Queue()
+
+    def pump():
+        for ln in proc.stdout:  # type: ignore[union-attr]
+            lines.put(ln.rstrip())
+        lines.put(None)
+
+    threading.Thread(target=pump, daemon=True).start()
     tail: list[str] = []
-    for line in proc.stdout:  # type: ignore[union-attr]
-        line = line.rstrip()
-        tail = (tail + [line])[-30:]
-        log.debug(line)
+    last_output = last_beat = time.monotonic()
+    last_emit = 0.0  # so the first line always shows
+    while True:
+        try:
+            line = lines.get(timeout=1.0)
+        except queue.Empty:
+            line = ""
         now = time.monotonic()
-        if line and now - last_emit > 0.2:  # throttle: tools can print thousands of lines
-            last_emit = now
-            progress(_frac[0], line[:200])
+        if line is None:
+            break
+        if line:
+            last_output = now
+            tail = (tail + [line])[-30:]
+            log.debug(line)
+            if now - last_emit > 0.2:  # throttle: tools can print thousands of lines
+                last_emit = now
+                progress(_frac[0], line[:200])
+        elif now - last_beat > 60:  # silent: record whether the process is doing anything
+            last_beat = now
+            log.warning("%s: no output for %.0fs (%s)", label, now - last_output, _cpu_ticks(proc.pid))
+        stop = None
         if cancel is not None and cancel.is_set():
-            os.killpg(proc.pid, 15)
-            from bg3vm.core.jobs import Cancelled
-            raise Cancelled()
+            stop = "cancel"
+        elif silence_timeout and now - last_output > silence_timeout:
+            stop = "silence"
+        if stop:
+            try:
+                os.killpg(proc.pid, 15)
+            except ProcessLookupError:
+                pass
+            proc.wait()
+            if stop == "cancel":
+                from bg3vm.core.jobs import Cancelled
+                raise Cancelled()
+            raise RuntimeError(f"{label} stopped: no output for {int(silence_timeout)}s. Last output:\n"
+                               + "\n".join(tail))
     if proc.wait() != 0:
         raise RuntimeError(f"{label} failed (exit {proc.returncode}):\n" + "\n".join(tail))
 
