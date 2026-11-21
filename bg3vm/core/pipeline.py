@@ -143,8 +143,12 @@ def _engine(ctx: Context):
 def stage_train(ctx: Context) -> None:
     p = ctx.project
     if p.voice_model:
-        voices.use_voice(Path(p.voice_model), p.dir("model"))
-        ctx.emit(1.0, f"Reusing saved voice: {Path(p.voice_model).name}")
+        src = Path(p.voice_model)
+        if not voices.engine_of(src):
+            raise RuntimeError(f"The saved voice is missing or damaged: {src}. Pick another voice or train a new one.")
+        if src.resolve() != p.dir("model").resolve():
+            voices.use_voice(src, p.dir("model"))
+        ctx.emit(1.0, f"Reusing saved voice: {src.name}")
         return
     _engine(ctx).train(p.dir("dataset"), p.dir("model"), p.preset, ctx.emit, ctx.cancel)
     from bg3vm.audio.pitch import median_f0

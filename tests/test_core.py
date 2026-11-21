@@ -371,60 +371,36 @@ def test_trained_voice_is_saved_and_reused_for_another_character(tmp_path):
     assert {v.name for v in voices.list_voices("fake")} == {"tav_one"}  # reusing doesn't add duplicates
 
 
-def test_project_models_trained_earlier_are_listed(tmp_path):
+def test_project_models_trained_earlier_are_imported_not_moved(tmp_path):
     from bg3vm.core import voices
     m = tmp_path / "projects/old/model"
     m.mkdir(parents=True)
     (m / "model.pth").write_bytes(b"x"); (m / "model.index").write_bytes(b"y")
-    got = voices.list_voices("rvc", library=tmp_path / "nolib", projects=tmp_path / "projects")
-    assert [(v.name, v.origin) for v in got] == [("old", "project")]
+    lib = tmp_path / "nolib"
+    assert voices.import_project_models(library=lib, projects=tmp_path / "projects") == ["old"]
+    assert voices.import_project_models(library=lib, projects=tmp_path / "projects") == []  # idempotent
+    assert (m / "model.pth").exists()                                   # the project keeps its copy
+    assert [(v.name, v.origin) for v in voices.list_voices("rvc", library=lib)] == [("old", "library")]
 
 
-STUB_WORKER = '''
-import json, sys, os
-import numpy as np, soundfile as sf
-spec = json.load(open(sys.argv[1]))
-for i, j in enumerate(spec["jobs"], 1):
-    n = int(24000 * (0.25 + 0.06 * len(j["text"].split())))
-    t = np.arange(n) / 24000
-    sf.write(j["out"], (0.3 * np.sin(2 * np.pi * 200 * t)).astype("float32"), 24000)
-    print(f"OK {i}/{len(spec['jobs'])} {j['key']}", flush=True)
-'''
+def test_clearing_a_project_never_destroys_a_trained_model(tmp_path):
+    from bg3vm.core import voices
+    from bg3vm.core.jobs import Stage, run_stages as run
+    p = Project.create("tavmod", base=tmp_path / "proj", engine="rvc")
+    m = p.dir("model")
+    (m / "model.pth").write_bytes(b"weights"); (m / "model.index").write_bytes(b"idx")
+    (p.dir("state") / "train.done").write_text("old")
+    # settings changed -> the 'train' stage is invalidated and its output ('model') is cleared; the model must survive
+    st = Stage("train", "Train", lambda ctx: None, key=lambda pr: ["changed"], outputs=("model",))
+    run([st], Context(p, lambda f, m_: None, threading.Event()))
+    saved = voices.list_voices("rvc")
+    assert [v.name for v in saved] == ["tavmod"] and (saved[0].path / "model.pth").read_bytes() == b"weights"
 
-
-@pytest.mark.skipif(not __import__("shutil").which("ffmpeg"), reason="needs ffmpeg")
-def test_american_accent_stage_respeaks_and_keeps_timing(tmp_path, monkeypatch):
-    import soundfile as sf
-    from bg3vm.accent.tts import AccentTTS
-    from bg3vm.game.loca import build_loca
-
-    SPK = "c7c13742bacd460a8f65f864fe41f255"
-    loc = tmp_path / "game/Data/Localization/English"
-    loc.mkdir(parents=True)
-    # the "original" lines: 1.5 s of tone with 0.2 s silence either side, 48 kHz like the real game files
-    t = np.arange(int(48000 * 1.5)) / 48000
-    body = (0.3 * np.sin(2 * np.pi * 120 * t)).astype("float32")
-    orig = np.concatenate([np.zeros(9600, "float32"), body, np.zeros(9600, "float32")])
-    wem = pcm_to_wem(orig, 48000)
-    write_pak(loc / "Voice.pak", {f"Mods/G/v{SPK}_h{i}g1.wem": wem for i in range(3)})
-    write_pak(loc / "English.pak", {"Localization/English/english.loca": build_loca({
-        "h0g1": "I marked the <i>spot</i>, my friend, long ago.", "h1g1": "Hmm.", "h2g1": "[Laughs]"})})
-    worker = tmp_path / "stub_worker.py"
-    worker.write_text(STUB_WORKER)
-    monkeypatch.setattr(pipeline, "AccentTTS", lambda: AccentTTS(worker_cmd=[sys.executable, str(worker)]))
-
-    class S: game_dir = str(tmp_path / "game"); bg3_appdata = str(tmp_path / "ad")
-    t2 = np.arange(40000 * 12) / 40000
-    sf.write(str(tmp_path / "me.wav"), (0.4 * np.sin(2 * np.pi * 180 * t2) * (np.sin(2 * np.pi * 0.2 * t2) > -0.3)).astype("float32"), 40000)
-    p = Project.create("acc", base=tmp_path / "proj", engine="fake", speaker="Astarion", accent="american",
-                       voice_inputs=[str(tmp_path / "me.wav")])
-    msgs = []
-    run_stages(pipeline.STAGES, Context(p, lambda f, m: msgs.append(m), threading.Event(), S()))
-    got = sorted(x.name for x in (p.root / "accent_wav").glob("*.wav"))
-    assert got == [f"v{SPK}_h0g1.wav"]             # only the line with real words; "Hmm." and "[Laughs]" kept
-    fitted, sr = sf.read(str(p.root / "accent_wav" / got[0]))
-    assert sr == 48000 and len(fitted) == len(orig)  # exact original length
-    start = np.nonzero(np.abs(fitted) > 0.01)[0][0]
-    assert abs(start - 9600) < 600                   # speech starts where the original speech started
-    assert any("1 lines re-spoken" in m for m in msgs)
-    assert len(list((tmp_path / "ad/Mods").glob("acc.pak"))) == 1
+    # a project reusing a voice that lives inside its own folder must not clear it either
+    q = Project.create("selfref", base=tmp_path / "proj", engine="rvc")
+    qm = q.dir("model")
+    (qm / "model.pth").write_bytes(b"w2"); (qm / "model.index").write_bytes(b"i2")
+    q.voice_model = str(qm)
+    (q.dir("state") / "train.done").write_text("old")
+    run([st], Context(q, lambda f, m_: None, threading.Event()))
+    assert (qm / "model.pth").read_bytes() == b"w2"

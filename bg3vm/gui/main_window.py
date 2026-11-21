@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import subprocess
 from pathlib import Path
@@ -16,7 +17,7 @@ from bg3vm.core.config import PROJECTS_DIR, Settings
 from bg3vm.core.logs import LOG_FILE
 from bg3vm.core.pipeline import STAGES
 from bg3vm.core.project import Project
-from bg3vm.core.voices import list_voices
+from bg3vm.core.voices import import_project_models, list_voices
 from bg3vm.engines import ENGINES
 from bg3vm.audio.vgmstream import find_vgmstream, install_vgmstream
 from bg3vm.game.steam import GameInstall, find_bg3, search_appdata
@@ -446,8 +447,24 @@ class MainWindow(QMainWindow):
                             + (f"\n\n{(r.stderr if r else err)[-300:]}" if (r or err) else ""))
         return False
 
+    def closeEvent(self, event):
+        """Stop background work before Qt tears down: a QThread still running at exit aborts the process."""
+        self.player.stop()
+        if self.installer and self.installer.running:
+            self.installer.cancel.set()
+        self.runner.shutdown()
+        for name in ("_scan_thread", "_sample_thread", "_find_thread"):
+            t = getattr(self, name, None)
+            if t is not None and t.isRunning():
+                t.wait(2000)
+        super().closeEvent(event)
+
     # ---- saved voices
     def _refresh_voices(self):
+        try:
+            import_project_models()  # keep trained voices safe in the library
+        except Exception:
+            logging.getLogger("bg3vm").exception("could not import project models")
         keep = self.voice_box.currentData()
         self.voice_box.blockSignals(True)
         self.voice_box.clear()

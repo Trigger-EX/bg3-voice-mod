@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 
 from PySide6.QtCore import QObject, QThread, Signal
@@ -65,3 +66,12 @@ class JobRunner(QObject):
 
     def cancel(self):
         self._cancel.set()
+
+    def shutdown(self, timeout_ms: int = 8000) -> None:
+        """Cancel and wait for the worker thread; as a last resort exit hard instead of letting Qt abort."""
+        if self._worker is None or not self._worker.isRunning():
+            return
+        self._cancel.set()
+        if not self._worker.wait(timeout_ms):
+            logging.getLogger("bg3vm").warning("pipeline did not stop in time; exiting")
+            os._exit(0)

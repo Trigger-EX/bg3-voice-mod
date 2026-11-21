@@ -5,6 +5,7 @@ import json
 import logging
 import shutil
 import threading
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Callable
 
@@ -45,9 +46,28 @@ class Context:
             raise Cancelled()
 
 
+def _inside(inner: Path, outer: Path) -> bool:
+    try:
+        inner.resolve().relative_to(outer.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
 def _wipe(project: Project, names: tuple[str, ...]) -> None:
+    from . import voices
+
+    if "model" in names:
+        try:
+            if voices.backup_before_wipe(project.root, project.name):
+                log.warning("saved the trained model of %s to the voice library before clearing it", project.name)
+        except Exception:
+            log.exception("could not back up the model before clearing it")
     for n in names:
         path = project.root / n
+        if project.voice_model and _inside(Path(project.voice_model), path):
+            log.warning("not clearing %s: the voice in use lives there", path)
+            continue
         if path.is_dir():
             shutil.rmtree(path, ignore_errors=True)
         elif path.exists():
